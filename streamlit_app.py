@@ -1,6 +1,7 @@
 """Stock Top 10 — 每日人气+成交额 Top 100 → AI 精选 Top 10"""
 
 import time
+import pandas as pd
 import streamlit as st
 
 st.set_page_config(
@@ -112,13 +113,15 @@ with col3:
 # Step 2: 合并 + 初筛
 merged = merge_candidates(hot_df, vol_df)
 if not up_df.empty:
-    # 飙升榜也合并进来
+    # 飙升榜也合并进来（直接 concat 去重，避免 KeyError: '排名'）
     up_simple = up_df[["代码", "股票名称", "最新价", "涨跌幅"]].copy()
     up_simple["来源"] = "飙升榜"
-    merged = merge_candidates(
-        merged,
-        up_simple.rename(columns={"来源": "来源"})
-    ) if not merged.empty else up_simple
+    if not merged.empty:
+        new_mask = ~up_simple["代码"].isin(merged["代码"])
+        if new_mask.any():
+            merged = pd.concat([merged, up_simple[new_mask]], ignore_index=True)
+    else:
+        merged = up_simple
 
 before_count = len(merged)
 filtered = apply_filters(merged)

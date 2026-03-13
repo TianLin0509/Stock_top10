@@ -35,8 +35,12 @@ def show_top10_cards(df: pd.DataFrame):
             badge_bg = "#fff7ed"
             badge_color = "#c2410c"
 
-        change_color = "#22c55e" if change >= 0 else "#ef4444"
-        change_sign = "+" if change >= 0 else ""
+        import math
+        _change_safe = change if (isinstance(change, float) and not math.isnan(change)) else 0.0
+        change_color = "#22c55e" if _change_safe >= 0 else "#ef4444"
+        change_sign = "+" if _change_safe >= 0 else ""
+        price_str = f"{price:.2f}" if isinstance(price, float) and not math.isnan(price) else str(price)
+        change_str = f"{change_sign}{_change_safe:.2f}"
 
         st.markdown(f"""<div style="
             background: #fff;
@@ -60,8 +64,8 @@ def show_top10_cards(df: pd.DataFrame):
                 ">{score}/10</div>
             </div>
             <div style="display:flex; gap:20px; font-size:0.88rem; color:#6b7280;">
-                <span>💰 {price}元</span>
-                <span style="color:{change_color}; font-weight:600;">{change_sign}{change}%</span>
+                <span>💰 {price_str}元</span>
+                <span style="color:{change_color}; font-weight:600;">{change_str}%</span>
                 <span>🤖 {model}</span>
             </div>
         </div>""", unsafe_allow_html=True)
@@ -84,10 +88,13 @@ def show_score_table(df: pd.DataFrame):
 
     if "涨跌幅" in display.columns:
         display["涨跌幅"] = display["涨跌幅"].apply(
-            lambda x: f"+{x}%" if x >= 0 else f"{x}%"
+            lambda x: (f"+{x:.2f}%" if x >= 0 else f"{x:.2f}%")
+            if pd.notna(x) else "N/A"
         )
     if "综合评分" in display.columns:
-        display["综合评分"] = display["综合评分"].apply(lambda x: f"{x}/10")
+        display["综合评分"] = display["综合评分"].apply(
+            lambda x: f"{x:.1f}/10" if pd.notna(x) else "N/A"
+        )
 
     st.dataframe(display, use_container_width=True, hide_index=False)
 
