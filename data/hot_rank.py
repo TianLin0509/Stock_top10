@@ -22,22 +22,6 @@ def get_hot_rank(top_n: int = 100) -> tuple[pd.DataFrame, str | None]:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_hot_up_rank(top_n: int = 100) -> tuple[pd.DataFrame, str | None]:
-    """东方财富飙升榜 Top N（人气飙升最快的股票）"""
-    try:
-        import akshare as ak
-        df = ak.stock_hot_up_em()
-        if df is None or df.empty:
-            return pd.DataFrame(), "飙升榜数据为空"
-        df = df.head(top_n)
-        df.columns = ["昨日排名_今日排名_变动", "排名", "代码", "股票名称", "最新价", "涨跌额", "涨跌幅"]
-        df["代码"] = df["代码"].str.replace(r"^(SH|SZ|BJ)", "", regex=True)
-        return df[["排名", "代码", "股票名称", "最新价", "涨跌额", "涨跌幅"]], None
-    except Exception as e:
-        return pd.DataFrame(), f"飙升榜获取失败：{e}"
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
 def get_volume_rank(top_n: int = 100) -> tuple[pd.DataFrame, str | None]:
     """成交额排名 Top N — 东方财富 HTTP 接口"""
     try:
@@ -95,25 +79,43 @@ def _get_volume_rank_akshare(top_n: int) -> tuple[pd.DataFrame, str | None]:
 
 
 def merge_candidates(hot_df: pd.DataFrame, vol_df: pd.DataFrame) -> pd.DataFrame:
-    """合并人气榜和成交额榜，去重，标记来源"""
-    dfs = []
+    """合并人气榜和成交额榜，去重，双榜股票标记为'双榜'"""
+    if hot_df.empty and vol_df.empty:
+        return pd.DataFrame()
+
+    # 以人气榜为基础
     if not hot_df.empty:
-        h = hot_df[["代码", "股票名称", "最新价", "涨跌幅"]].copy()
-        h["来源"] = "人气榜"
-        h["人气排名"] = hot_df["排名"]
-        dfs.append(h)
+        merged = hot_df[["代码", "股票名称", "最新价", "涨跌幅"]].copy()
+        merged["来源"] = "人气榜"
+        merged["人气排名"] = hot_df["排名"]
+    else:
+        merged = pd.DataFrame()
+
+    # 处理成交额榜
     if not vol_df.empty:
         v = vol_df[["代码", "股票名称", "最新价", "涨跌幅"]].copy()
-        v["来源"] = "成交额榜"
         v["成交额排名"] = vol_df["排名"]
         if "成交额(亿)" in vol_df.columns:
             v["成交额(亿)"] = vol_df["成交额(亿)"]
-        dfs.append(v)
 
-    if not dfs:
-        return pd.DataFrame()
+        if not merged.empty:
+            # 双榜股票：补充成交额信息，标记为"双榜"
+            both_mask = merged["代码"].isin(v["代码"])
+            merged.loc[both_mask, "来源"] = "双榜"
 
-    merged = pd.concat(dfs, ignore_index=True)
-    # 去重：保留第一个出现的（优先人气榜）
-    merged = merged.drop_duplicates(subset=["代码"], keep="first").reset_index(drop=True)
-    return merged
+            vol_info = v.set_index("代码")[["成交额排名"]].to_dict()["成交额排名"]
+            merged["成交额排名"] = merged["代码"].map(vol_info)
+            if "成交额(亿)" in v.columns:
+                vol_amt = v.set_index("代码")["成交额(亿)"].to_dict()
+                merged["成交额(亿)"] = merged["代码"].map(vol_amt)
+
+            # 仅成交额榜的股票追加
+            new_only = v[~v["代码"].isin(merged["代码"])].copy()
+            if not new_only.empty:
+                new_only["来源"] = "成交额榜"
+                merged = pd.concat([merged, new_only], ignore_index=True)
+        else:
+            v["来源"] = "成交额榜"
+            merged = v
+
+    return merged.reset_index(drop=True)

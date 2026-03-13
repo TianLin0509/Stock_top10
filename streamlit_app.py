@@ -1,7 +1,6 @@
 """Stock Top 10 — 每日人气+成交额 Top 100 → AI 精选 Top 10"""
 
 import time
-import pandas as pd
 import streamlit as st
 
 st.set_page_config(
@@ -12,7 +11,7 @@ st.set_page_config(
 
 from config import MODEL_CONFIGS, MODEL_NAMES
 from ai.client import get_ai_client, get_token_usage, reset_token_usage
-from data.hot_rank import get_hot_rank, get_hot_up_rank, get_volume_rank, merge_candidates
+from data.hot_rank import get_hot_rank, get_volume_rank, merge_candidates
 from data.stock_filter import apply_filters, get_filter_summary
 from analysis.runner import (
     get_cached_result, is_running, is_done, get_job, start_scoring,
@@ -65,7 +64,6 @@ with st.sidebar:
     st.markdown("### 📊 数据来源")
     st.caption("🔥 东方财富人气榜")
     st.caption("💰 东方财富成交额榜")
-    st.caption("📈 飙升榜（人气飙升最快）")
 
     st.markdown("---")
     if st.button("🔄 重置 Token 计数"):
@@ -84,7 +82,7 @@ with st.sidebar:
 # Step 1: 获取数据
 st.markdown("### 📡 数据获取")
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 
 with col1:
     with st.spinner("加载人气榜..."):
@@ -102,26 +100,8 @@ with col2:
     else:
         st.success(f"💰 成交额榜 Top {len(vol_df)}")
 
-with col3:
-    with st.spinner("加载飙升榜..."):
-        up_df, up_err = get_hot_up_rank(top_n)
-    if up_err:
-        st.warning(f"飙升榜：{up_err}")
-    else:
-        st.success(f"📈 飙升榜 Top {len(up_df)}")
-
 # Step 2: 合并 + 初筛
 merged = merge_candidates(hot_df, vol_df)
-if not up_df.empty:
-    # 飙升榜也合并进来（直接 concat 去重，避免 KeyError: '排名'）
-    up_simple = up_df[["代码", "股票名称", "最新价", "涨跌幅"]].copy()
-    up_simple["来源"] = "飙升榜"
-    if not merged.empty:
-        new_mask = ~up_simple["代码"].isin(merged["代码"])
-        if new_mask.any():
-            merged = pd.concat([merged, up_simple[new_mask]], ignore_index=True)
-    else:
-        merged = up_simple
 
 before_count = len(merged)
 filtered = apply_filters(merged)
