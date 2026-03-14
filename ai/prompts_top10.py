@@ -12,7 +12,10 @@ def build_score_prompt(stock_code: str, stock_name: str,
                        price: float, change_pct: float,
                        hot_rank: int | None = None,
                        vol_rank: int | None = None,
-                       volume_yi: float | None = None) -> str:
+                       volume_yi: float | None = None,
+                       turnover_rate: float | None = None,
+                       volume_ratio: float | None = None,
+                       net_flow_wan: float | None = None) -> str:
     """构建单只股票的评分 prompt"""
 
     rank_info = []
@@ -24,12 +27,24 @@ def build_score_prompt(stock_code: str, stock_name: str,
 
     vol_str = f"，成交额约{volume_yi}亿" if volume_yi else ""
 
+    # 量价指标
+    extra_lines = []
+    if turnover_rate is not None:
+        extra_lines.append(f"换手率：{turnover_rate}%")
+    if volume_ratio is not None:
+        extra_lines.append(f"量比：{volume_ratio}")
+    if net_flow_wan is not None:
+        flow_desc = f"+{net_flow_wan}" if net_flow_wan >= 0 else f"{net_flow_wan}"
+        extra_lines.append(f"主力净流入：{flow_desc}万元")
+    extra_str = "\n- ".join(extra_lines)
+    extra_block = f"\n- {extra_str}" if extra_str else ""
+
     return f"""请对以下A股标的进行深度分析和评分：
 
 ## 股票信息
 - 股票：{stock_name}（{stock_code}）
 - 最新价：{price}元，涨跌幅：{change_pct}%{vol_str}
-- 今日排名：{rank_str}
+- 今日排名：{rank_str}{extra_block}
 
 ## 请从以下三个维度分析并评分（每项1-10分）：
 

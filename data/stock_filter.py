@@ -16,10 +16,9 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     mask_st = filtered["股票名称"].str.contains(r"ST|退市", case=False, na=False)
     filtered = filtered[~mask_st]
 
-    # 2. 排除北交所 (代码8开头) 和科创板 (688开头) — 流动性/交易规则不同
+    # 2. 排除北交所 (代码8开头) — 流动性不足
     mask_bj = filtered["代码"].str.startswith("8")
-    mask_kc = filtered["代码"].str.startswith("688")
-    filtered = filtered[~mask_bj & ~mask_kc]
+    filtered = filtered[~mask_bj]
 
     # 3. 排除涨跌幅异常 — 涨停或跌停的追高风险大
     # 涨跌幅 > 9.8% 可能是涨停，< -9.8% 是跌停
@@ -43,4 +42,4 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 def get_filter_summary(before: int, after: int) -> str:
     """返回过滤摘要文本"""
     removed = before - after
-    return f"初筛：{before} → {after}（过滤 {removed} 只：ST/退市、北交所/科创板、跌停、低价股）"
+    return f"初筛：{before} → {after}（过滤 {removed} 只：ST/退市、北交所、跌停、低价股）"

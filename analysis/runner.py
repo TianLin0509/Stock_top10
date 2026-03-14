@@ -5,7 +5,8 @@ import time
 from datetime import date
 import pandas as pd
 import streamlit as st
-from ai.client import get_ai_client
+from ai.client import get_ai_client, call_ai
+from ai.prompts_top10 import SYSTEM_SUMMARY, build_summary_prompt
 from analysis.scorer import score_all, get_top_n
 
 
@@ -79,8 +80,30 @@ def start_scoring(ss, candidates_df: pd.DataFrame, model_name: str):
                                model_name=model_name,
                                progress_callback=progress_cb)
 
-            job["progress"].append(f"✅ 分析完成！共评分 {len(scored)} 只股票")
+            job["progress"].append(f"✅ 评分完成！共评分 {len(scored)} 只股票")
             job["result"] = scored
+
+            # 生成总结报告
+            job["progress"].append("📝 正在生成每日总结报告...")
+            try:
+                top10 = scored.head(10)
+                stock_lines = []
+                for _, r in top10.iterrows():
+                    stock_lines.append(
+                        f"- {r['股票名称']}({r['代码']}) 综合评分{r['综合评分']}/10"
+                        f" 短线建议:{r.get('短线建议','未知')}"
+                    )
+                stocks_text = "\n".join(stock_lines)
+                summary_prompt = build_summary_prompt(stocks_text, len(candidates_df))
+                summary_text, s_err = call_ai(
+                    client, cfg, summary_prompt,
+                    system=SYSTEM_SUMMARY, max_tokens=4000
+                )
+                job["summary"] = summary_text if not s_err else f"总结生成失败：{s_err}"
+            except Exception as se:
+                job["summary"] = f"总结生成失败：{se}"
+
+            job["progress"].append("✅ 全部完成！")
             job["status"] = "done"
 
             # 缓存结果

@@ -117,7 +117,8 @@ candidates = filtered.head(max_analyze)
 with st.expander(f"📋 候选池（{len(candidates)} 只）", expanded=False):
     if not candidates.empty:
         display_cols = [c for c in ["代码", "股票名称", "最新价", "涨跌幅", "来源",
-                                     "人气排名", "成交额排名", "成交额(亿)"]
+                                     "人气排名", "成交额排名", "成交额(亿)",
+                                     "换手率", "量比", "主力净流入(万)"]
                         if c in candidates.columns]
         st.dataframe(candidates[display_cols], use_container_width=True, hide_index=True)
     else:
@@ -159,6 +160,12 @@ elif is_done(st.session_state):
         show_top10_cards(result_df)
         with st.expander("📊 完整评分表", expanded=False):
             show_score_table(result_df)
+        # 每日总结报告
+        summary = job.get("summary", "")
+        if summary:
+            st.markdown("---")
+            st.markdown("### 📝 每日总结报告")
+            st.markdown(summary)
 
 else:
     # 未开始

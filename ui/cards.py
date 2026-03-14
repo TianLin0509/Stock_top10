@@ -20,6 +20,10 @@ def show_top10_cards(df: pd.DataFrame):
         price = row.get("最新价", 0)
         change = row.get("涨跌幅", 0)
         model = row.get("模型", "")
+        advice = row.get("短线建议", "")
+        s_fund = row.get("基本面")
+        s_theme = row.get("题材热度")
+        s_tech = row.get("技术面")
 
         # 颜色
         if score >= 8:
@@ -42,6 +46,36 @@ def show_top10_cards(df: pd.DataFrame):
         price_str = f"{price:.2f}" if isinstance(price, float) and not math.isnan(price) else str(price)
         change_str = f"{change_sign}{_change_safe:.2f}"
 
+        # 短线建议标签
+        advice_map = {
+            "强烈推荐": ("#dc2626", "#fef2f2", "🔥 强烈推荐"),
+            "推荐": ("#16a34a", "#f0fdf4", "👍 推荐"),
+            "观望": ("#d97706", "#fffbeb", "👀 观望"),
+            "回避": ("#6b7280", "#f3f4f6", "⛔ 回避"),
+        }
+        adv_color, adv_bg, adv_text = advice_map.get(advice, ("#6b7280", "#f3f4f6", ""))
+        advice_html = f"""<span style="
+            background:{adv_bg}; color:{adv_color};
+            border-radius:50px; padding:2px 10px;
+            font-weight:700; font-size:0.78rem; margin-left:10px;
+        ">{adv_text}</span>""" if adv_text else ""
+
+        # 子评分进度条
+        def _bar(label, val, color):
+            if val is None or (isinstance(val, float) and math.isnan(val)):
+                return ""
+            pct = min(val * 10, 100)
+            return f"""<div style="display:flex; align-items:center; gap:6px; margin-top:2px;">
+                <span style="font-size:0.75rem; color:#6b7280; min-width:56px;">{label}</span>
+                <div style="flex:1; background:#f1f5f9; border-radius:4px; height:8px; overflow:hidden;">
+                    <div style="width:{pct}%; background:{color}; height:100%; border-radius:4px;"></div>
+                </div>
+                <span style="font-size:0.75rem; color:#374151; min-width:28px; text-align:right;">{val:.0f}</span>
+            </div>"""
+
+        sub_bars = _bar("基本面", s_fund, "#3b82f6") + _bar("题材", s_theme, "#f59e0b") + _bar("技术面", s_tech, "#22c55e")
+        sub_section = f'<div style="margin-top:8px;">{sub_bars}</div>' if sub_bars else ""
+
         st.markdown(f"""<div style="
             background: #fff;
             border: 2px solid {border_color};
@@ -56,6 +90,7 @@ def show_top10_cards(df: pd.DataFrame):
                         #{i} {name}
                     </span>
                     <span style="font-size:0.85rem; color:#6b7280; margin-left:8px;">{code}</span>
+                    {advice_html}
                 </div>
                 <div style="
                     background:{badge_bg}; color:{badge_color};
@@ -68,6 +103,7 @@ def show_top10_cards(df: pd.DataFrame):
                 <span style="color:{change_color}; font-weight:600;">{change_str}%</span>
                 <span>🤖 {model}</span>
             </div>
+            {sub_section}
         </div>""", unsafe_allow_html=True)
 
         # 展开查看详细分析
@@ -82,7 +118,8 @@ def show_score_table(df: pd.DataFrame):
     if df.empty:
         return
 
-    display_cols = ["代码", "股票名称", "最新价", "涨跌幅", "综合评分", "模型"]
+    display_cols = ["代码", "股票名称", "最新价", "涨跌幅",
+                    "基本面", "题材热度", "技术面", "综合评分", "短线建议", "模型"]
     available = [c for c in display_cols if c in df.columns]
     display = df[available].copy()
 
