@@ -220,6 +220,21 @@ def show_candidate_table(df: pd.DataFrame):
                     if c in df.columns]
     display = df[display_cols].copy()
 
+    # 排名列转整数
+    for col in ["人气排名", "成交额排名"]:
+        if col in display.columns:
+            display[col] = display[col].apply(
+                lambda x: int(x) if pd.notna(x) else ""
+            )
+
+    # 所有浮点列最多保留两位小数
+    for col in ["最新价", "涨跌幅", "成交额(亿)", "换手率", "量比",
+                "市盈率", "总市值(亿)", "主力净流入(万)"]:
+        if col in display.columns:
+            display[col] = display[col].apply(
+                lambda x: round(x, 2) if isinstance(x, float) and pd.notna(x) else x
+            )
+
     # 来源着色
     if "来源" in display.columns:
         def _style_source(val):

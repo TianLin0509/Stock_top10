@@ -275,13 +275,21 @@ def get_sector_rotation() -> dict:
     result = {"概念板块": [], "行业板块": []}
     try:
         import akshare as ak
-        # 概念板块
+        # 概念板块（排除非传统概念：连板/打板/竞价等技术性标签）
+        _EXCLUDE_KEYWORDS = [
+            "连板", "打板", "竞价", "涨停", "跌停", "首板", "二板", "三板",
+            "昨日", "炸板", "地天板", "天地板", "反包", "断板", "空间板",
+        ]
         df_concept = ak.stock_board_concept_name_em()
         if df_concept is not None and not df_concept.empty:
-            # 按涨跌幅排序，取 Top5
-            if "涨跌幅" in df_concept.columns:
+            if "涨跌幅" in df_concept.columns and "板块名称" in df_concept.columns:
                 df_concept["涨跌幅"] = pd.to_numeric(df_concept["涨跌幅"], errors="coerce")
-                top5 = df_concept.nlargest(5, "涨跌幅")
+                # 过滤掉技术性标签
+                mask = df_concept["板块名称"].apply(
+                    lambda x: not any(kw in str(x) for kw in _EXCLUDE_KEYWORDS)
+                )
+                df_filtered = df_concept[mask]
+                top5 = df_filtered.nlargest(5, "涨跌幅")
                 for _, row in top5.iterrows():
                     name = row.get("板块名称", "")
                     chg = row.get("涨跌幅", 0)

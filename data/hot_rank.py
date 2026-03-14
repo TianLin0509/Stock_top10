@@ -130,4 +130,64 @@ def merge_candidates(hot_df: pd.DataFrame, vol_df: pd.DataFrame) -> pd.DataFrame
             v["来源"] = "成交额榜"
             merged = v
 
+    # 为缺少成交额的股票（仅人气榜来源）补充数据
+    merged = _fill_missing_volume(merged)
+
     return merged.reset_index(drop=True)
+
+
+def _fill_missing_volume(df: pd.DataFrame) -> pd.DataFrame:
+    """为缺少成交额的股票从东方财富批量获取成交额"""
+    if df.empty:
+        return df
+    missing = df["成交额(亿)"].isna() | (df["成交额(亿)"] == 0) if "成交额(亿)" in df.columns else pd.Series([True] * len(df))
+    if not missing.any():
+        return df
+
+    codes_need = df.loc[missing, "代码"].tolist()
+    if not codes_need:
+        return df
+
+    try:
+        import requests as req
+        # 批量获取全 A 股成交额（取 Top 500 覆盖所有候选）
+        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        params = {
+            "pn": 1, "pz": 500, "po": 1,
+            "np": 1, "fltt": 2, "invt": 2,
+            "fid": "f6",
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+            "fields": "f6,f8,f10,f12,f62",
+            "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+        }
+        resp = req.get(url, params=params, timeout=10)
+        items = resp.json().get("data", {}).get("diff", [])
+        if items:
+            vol_map = {}
+            turnover_map = {}
+            ratio_map = {}
+            flow_map = {}
+            for item in items:
+                code = item.get("f12", "")
+                f6 = item.get("f6", 0)
+                if code and f6 and f6 != "-":
+                    vol_map[code] = round(float(f6) / 1e8, 2)
+                f8 = item.get("f8", 0)
+                if f8 and f8 != "-":
+                    turnover_map[code] = f8
+                f10 = item.get("f10", 0)
+                if f10 and f10 != "-":
+                    ratio_map[code] = f10
+                f62 = item.get("f62", 0)
+                if f62 and f62 != "-":
+                    flow_map[code] = round(float(f62) / 1e4, 2)
+
+            for col, mapping in [("成交额(亿)", vol_map), ("换手率", turnover_map),
+                                  ("量比", ratio_map), ("主力净流入(万)", flow_map)]:
+                if col not in df.columns:
+                    df[col] = None
+                mask = df[col].isna() | (df[col] == 0)
+                df.loc[mask, col] = df.loc[mask, "代码"].map(mapping)
+    except Exception:
+        pass
+    return df
