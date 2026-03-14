@@ -1,33 +1,38 @@
-"""后台分析调度 — 线程池逐只评分"""
+"""后台分析调度 — 数据增强 + 并行评分"""
 
 import threading
-import time
 from datetime import date
 import pandas as pd
 import streamlit as st
 from ai.client import get_ai_client, call_ai
 from ai.prompts_top10 import SYSTEM_SUMMARY, build_summary_prompt
-from analysis.scorer import score_all, get_top_n
+from analysis.scorer import score_all
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 每日缓存键
+# 每日缓存
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _cache_key(model_name: str) -> str:
     return f"top10_result_{date.today().isoformat()}_{model_name}"
 
 
+def _summary_key(model_name: str) -> str:
+    return f"top10_summary_{date.today().isoformat()}_{model_name}"
+
+
 def get_cached_result(model_name: str) -> pd.DataFrame | None:
-    """获取今日缓存的评分结果"""
-    key = _cache_key(model_name)
-    return st.session_state.get(key)
+    return st.session_state.get(_cache_key(model_name))
 
 
-def save_cached_result(model_name: str, df: pd.DataFrame):
-    """缓存今日评分结果"""
-    key = _cache_key(model_name)
-    st.session_state[key] = df
+def get_cached_summary(model_name: str) -> str | None:
+    return st.session_state.get(_summary_key(model_name))
+
+
+def save_cached_result(model_name: str, df: pd.DataFrame, summary: str = ""):
+    st.session_state[_cache_key(model_name)] = df
+    if summary:
+        st.session_state[_summary_key(model_name)] = summary
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -35,7 +40,6 @@ def save_cached_result(model_name: str, df: pd.DataFrame):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_job(ss) -> dict:
-    """获取当前后台任务"""
     return ss.get("bg_job", {})
 
 
@@ -50,7 +54,7 @@ def is_done(ss) -> bool:
 def start_scoring(ss, candidates_df: pd.DataFrame, model_name: str):
     """启动后台评分线程"""
     if is_running(ss):
-        return  # 已在运行
+        return
 
     client, cfg, err = get_ai_client(model_name)
     if err:
@@ -62,6 +66,7 @@ def start_scoring(ss, candidates_df: pd.DataFrame, model_name: str):
         "progress": [],
         "error": None,
         "result": None,
+        "summary": None,
         "model": model_name,
         "total": len(candidates_df),
         "current": 0,
@@ -70,44 +75,67 @@ def start_scoring(ss, candidates_df: pd.DataFrame, model_name: str):
 
     def _run():
         try:
-            job["progress"].append(f"📊 开始逐只分析，共 {len(candidates_df)} 只候选股...")
+            # Phase 1: 数据增强
+            job["progress"].append("📊 正在从 Tushare 获取增强数据（PE/PB/K线）...")
+            try:
+                from data.tushare_data import enrich_candidates, ts_ok
+                if ts_ok():
+                    enriched_df = enrich_candidates(
+                        candidates_df,
+                        progress_callback=lambda msg: job["progress"].append(f"  {msg}")
+                    )
+                    job["progress"].append(f"✅ 数据增强完成（行业/PE/PB/K线摘要）")
+                else:
+                    enriched_df = candidates_df
+                    job["progress"].append("⚠️ Tushare 不可用，使用基础数据分析")
+            except Exception as e:
+                enriched_df = candidates_df
+                job["progress"].append(f"⚠️ 数据增强失败({e})，使用基础数据")
+
+            # Phase 2: 并行 AI 评分
+            total = len(enriched_df)
+            job["progress"].append(f"🤖 开始并行AI评分，共 {total} 只候选股（3路并发）...")
 
             def progress_cb(current, total, msg):
                 job["current"] = current
                 job["progress"].append(f"[{current}/{total}] {msg}")
 
-            scored = score_all(client, cfg, candidates_df,
+            scored = score_all(client, cfg, enriched_df,
                                model_name=model_name,
-                               progress_callback=progress_cb)
+                               progress_callback=progress_cb,
+                               max_workers=3)
 
             job["progress"].append(f"✅ 评分完成！共评分 {len(scored)} 只股票")
             job["result"] = scored
 
-            # 生成总结报告
+            # Phase 3: 生成总结报告
             job["progress"].append("📝 正在生成每日总结报告...")
+            summary = ""
             try:
                 top10 = scored.head(10)
                 stock_lines = []
                 for _, r in top10.iterrows():
-                    stock_lines.append(
-                        f"- {r['股票名称']}({r['代码']}) 综合评分{r['综合评分']}/10"
-                        f" 短线建议:{r.get('短线建议','未知')}"
-                    )
+                    line = (f"- {r['股票名称']}({r['代码']}) "
+                            f"行业:{r.get('行业','未知')} "
+                            f"综合评分{r['综合评分']}/10 "
+                            f"短线建议:{r.get('短线建议','未知')}")
+                    stock_lines.append(line)
                 stocks_text = "\n".join(stock_lines)
-                summary_prompt = build_summary_prompt(stocks_text, len(candidates_df))
-                summary_text, s_err = call_ai(
+                summary_prompt = build_summary_prompt(stocks_text, total)
+                summary, s_err = call_ai(
                     client, cfg, summary_prompt,
                     system=SYSTEM_SUMMARY, max_tokens=4000
                 )
-                job["summary"] = summary_text if not s_err else f"总结生成失败：{s_err}"
+                if s_err:
+                    summary = f"总结生成失败：{s_err}"
             except Exception as se:
-                job["summary"] = f"总结生成失败：{se}"
+                summary = f"总结生成失败：{se}"
 
+            job["summary"] = summary
             job["progress"].append("✅ 全部完成！")
             job["status"] = "done"
 
-            # 缓存结果
-            save_cached_result(model_name, scored)
+            save_cached_result(model_name, scored, summary)
 
         except Exception as e:
             job["error"] = str(e)

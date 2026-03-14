@@ -32,7 +32,7 @@ def get_volume_rank(top_n: int = 100) -> tuple[pd.DataFrame, str | None]:
             "np": 1, "fltt": 2, "invt": 2,
             "fid": "f6",  # 按成交额排序
             "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
-            "fields": "f2,f3,f5,f6,f8,f10,f12,f14,f62",
+            "fields": "f2,f3,f5,f6,f8,f9,f10,f12,f14,f20,f23,f62",
             "ut": "fa5fd1943c7b386f172d6893dbfba10b",
         }
         resp = req.get(url, params=params, timeout=15)
@@ -41,20 +41,26 @@ def get_volume_rank(top_n: int = 100) -> tuple[pd.DataFrame, str | None]:
         if not items:
             return pd.DataFrame(), "成交额榜数据为空"
 
+        def _safe_num(v, default=0):
+            if v is None or v == "-" or isinstance(v, str):
+                return default
+            return v
+
         rows = []
         for i, item in enumerate(items, 1):
-            net_flow = item.get("f62", 0)
-            if isinstance(net_flow, str) or net_flow == "-":
-                net_flow = 0
+            net_flow = _safe_num(item.get("f62", 0))
+            mkt_cap = _safe_num(item.get("f20", 0))
             rows.append({
                 "排名": i,
                 "代码": item.get("f12", ""),
                 "股票名称": item.get("f14", ""),
                 "最新价": item.get("f2", 0),
                 "涨跌幅": item.get("f3", 0),
-                "成交额(亿)": round(item.get("f6", 0) / 1e8, 2),
-                "换手率": item.get("f8", 0),
-                "量比": item.get("f10", 0),
+                "成交额(亿)": round(_safe_num(item.get("f6", 0)) / 1e8, 2),
+                "换手率": _safe_num(item.get("f8", 0)),
+                "量比": _safe_num(item.get("f10", 0)),
+                "市盈率": _safe_num(item.get("f9", 0)),
+                "总市值(亿)": round(mkt_cap / 1e8, 1) if mkt_cap else 0,
                 "主力净流入(万)": round(net_flow / 1e4, 2) if net_flow else 0,
             })
         return pd.DataFrame(rows), None
@@ -111,7 +117,7 @@ def merge_candidates(hot_df: pd.DataFrame, vol_df: pd.DataFrame) -> pd.DataFrame
 
             v_indexed = v.set_index("代码")
             merged["成交额排名"] = merged["代码"].map(v_indexed["成交额排名"].to_dict())
-            for col in ["成交额(亿)", "换手率", "量比", "主力净流入(万)"]:
+            for col in ["成交额(亿)", "换手率", "量比", "市盈率", "总市值(亿)", "主力净流入(万)"]:
                 if col in v.columns:
                     merged[col] = merged["代码"].map(v_indexed[col].to_dict())
 

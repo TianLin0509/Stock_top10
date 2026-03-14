@@ -10,11 +10,12 @@ st.set_page_config(
 )
 
 from config import MODEL_CONFIGS, MODEL_NAMES
-from ai.client import get_ai_client, get_token_usage, reset_token_usage
+from ai.client import get_token_usage, reset_token_usage
 from data.hot_rank import get_hot_rank, get_volume_rank, merge_candidates
 from data.stock_filter import apply_filters, get_filter_summary
 from analysis.runner import (
-    get_cached_result, is_running, is_done, get_job, start_scoring,
+    get_cached_result, get_cached_summary, is_running, is_done,
+    get_job, start_scoring,
 )
 from ui.styles import inject_css
 from ui.cards import show_top10_cards, show_score_table, show_progress
@@ -29,23 +30,25 @@ inject_css()
 # Token 计数显示
 usage = get_token_usage()
 if usage["total"] > 0:
+    total = usage["total"]
+    display = f"{total / 10000:.1f}万" if total >= 10000 else f"{total:,}"
     st.markdown(f"""<div style="
         position:fixed; top:10px; right:18px; z-index:9999;
         background:rgba(99,102,241,0.9); color:#fff;
         border-radius:50px; padding:4px 14px;
         font-size:0.75rem; font-weight:700;
         box-shadow:0 2px 8px rgba(0,0,0,0.15);
-    ">🔢 Token: {usage['total']:,}</div>""", unsafe_allow_html=True)
+    ">🔢 Token: {display}</div>""", unsafe_allow_html=True)
 
 st.markdown("""<div class="app-header">
   <h1>🏆 每日 Top 10 精选</h1>
-  <p>人气榜 + 成交额榜 → 量化初筛 → AI 深度分析 → 精选 Top 10</p>
+  <p>人气榜 + 成交额榜 → Tushare 数据增强 → AI 深度分析 → 精选 Top 10</p>
   <p style="font-weight:700; color:#fff;">立花道雪</p>
 </div>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Sidebar — 模型选择 + 参数
+# Sidebar
 # ══════════════════════════════════════════════════════════════════════════════
 
 with st.sidebar:
@@ -64,6 +67,30 @@ with st.sidebar:
     st.markdown("### 📊 数据来源")
     st.caption("🔥 东方财富人气榜")
     st.caption("💰 东方财富成交额榜")
+    # Tushare 状态
+    try:
+        from data.tushare_data import get_ts_status
+        st.caption(f"📈 {get_ts_status()}")
+    except Exception:
+        st.caption("📈 Tushare 未加载")
+
+    st.markdown("---")
+    # 邮件推送
+    st.markdown("### 📧 邮件推送")
+    try:
+        from utils.email_sender import smtp_configured
+        if smtp_configured():
+            email_addr = st.text_input("收件邮箱", value="", placeholder="your@email.com",
+                                       key="email_input")
+            st.caption("分析完成后可一键推送报告到邮箱")
+        else:
+            st.caption("⚠️ SMTP 未配置")
+            st.caption("请在 Secrets 中添加：")
+            st.code("SMTP_HOST\nSMTP_PORT\nSMTP_USER\nSMTP_PASS", language=None)
+            email_addr = ""
+    except Exception:
+        st.caption("📧 邮件模块未加载")
+        email_addr = ""
 
     st.markdown("---")
     if st.button("🔄 重置 Token 计数"):
@@ -118,7 +145,8 @@ with st.expander(f"📋 候选池（{len(candidates)} 只）", expanded=False):
     if not candidates.empty:
         display_cols = [c for c in ["代码", "股票名称", "最新价", "涨跌幅", "来源",
                                      "人气排名", "成交额排名", "成交额(亿)",
-                                     "换手率", "量比", "主力净流入(万)"]
+                                     "换手率", "量比", "市盈率", "总市值(亿)",
+                                     "主力净流入(万)"]
                         if c in candidates.columns]
         st.dataframe(candidates[display_cols], use_container_width=True, hide_index=True)
     else:
@@ -129,21 +157,46 @@ st.markdown("---")
 # Step 4: AI 分析
 st.markdown("### 🤖 AI 深度分析")
 
+
+def _show_results(result_df, summary_text=""):
+    """展示分析结果 + 邮件发送按钮"""
+    show_top10_cards(result_df)
+    with st.expander("📊 完整评分表", expanded=False):
+        show_score_table(result_df)
+
+    if summary_text:
+        st.markdown("---")
+        st.markdown("### 📝 每日总结报告")
+        st.markdown(summary_text)
+
+    # 邮件发送
+    if email_addr:
+        if st.button("📧 发送报告到邮箱", key="send_email"):
+            with st.spinner("正在发送..."):
+                from utils.email_sender import send_report_email
+                ok, msg = send_report_email(email_addr, result_df,
+                                            summary_text, model_name)
+                if ok:
+                    st.success(f"✅ 报告已发送至 {email_addr}")
+                else:
+                    st.error(msg)
+
+
 # 检查缓存
 cached = get_cached_result(model_name)
+cached_summary = get_cached_summary(model_name) or ""
 
 if cached is not None and not cached.empty:
     st.success(f"📦 已有今日 {model_name} 的分析缓存（{len(cached)} 只），直接展示结果")
-    show_top10_cards(cached)
-    with st.expander("📊 完整评分表", expanded=False):
-        show_score_table(cached)
+    _show_results(cached, cached_summary)
     if st.button("🔄 重新分析（忽略缓存）", key="re_analyze"):
-        st.session_state.pop(f"top10_result_{__import__('datetime').date.today().isoformat()}_{model_name}", None)
+        from datetime import date as _date
+        st.session_state.pop(f"top10_result_{_date.today().isoformat()}_{model_name}", None)
+        st.session_state.pop(f"top10_summary_{_date.today().isoformat()}_{model_name}", None)
         st.session_state.pop("bg_job", None)
         st.rerun()
 
 elif is_running(st.session_state):
-    # 显示进度
     show_progress(get_job(st.session_state))
     time.sleep(2)
     st.rerun()
@@ -156,23 +209,14 @@ elif is_done(st.session_state):
             st.session_state.pop("bg_job", None)
             st.rerun()
     elif job.get("result") is not None:
-        result_df = job["result"]
-        show_top10_cards(result_df)
-        with st.expander("📊 完整评分表", expanded=False):
-            show_score_table(result_df)
-        # 每日总结报告
-        summary = job.get("summary", "")
-        if summary:
-            st.markdown("---")
-            st.markdown("### 📝 每日总结报告")
-            st.markdown(summary)
+        _show_results(job["result"], job.get("summary", ""))
 
 else:
-    # 未开始
     if candidates.empty:
         st.warning("候选池为空，请检查数据源")
     else:
-        st.info(f"将使用 **{model_name}** 对 {len(candidates)} 只候选股进行深度分析")
+        st.info(f"将使用 **{model_name}** 对 {len(candidates)} 只候选股进行深度分析"
+                f"（3路并发，预计耗时约 {len(candidates) * 8 // 3} 秒）")
         if st.button("🚀 开始 AI 分析", type="primary", key="start_analysis"):
             start_scoring(st.session_state, candidates, model_name)
             time.sleep(0.5)

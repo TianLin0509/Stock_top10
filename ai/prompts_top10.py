@@ -5,6 +5,8 @@ SYSTEM_SCORER = (
     "你是一位顶级A股短线投资顾问，擅长从基本面、题材热度、技术面三个维度筛选优质标的。"
     "你的分析风格：数据驱动、逻辑清晰、敢于给出明确评分和结论。"
     "评分标准偏好：基本面扎实 + 题材正宗（不是蹭概念）+ 短期有明显启动趋势（放量突破、均线多头等）。"
+    "重要：下方提供的行情数据和K线数据是准确的实时数据，请以此为基础分析。"
+    "对于近期新闻、公告等信息，请结合联网搜索结果判断。"
 )
 
 
@@ -15,7 +17,12 @@ def build_score_prompt(stock_code: str, stock_name: str,
                        volume_yi: float | None = None,
                        turnover_rate: float | None = None,
                        volume_ratio: float | None = None,
-                       net_flow_wan: float | None = None) -> str:
+                       net_flow_wan: float | None = None,
+                       pe: float | None = None,
+                       pb: float | None = None,
+                       mkt_cap_yi: float | None = None,
+                       industry: str | None = None,
+                       kline_summary: str | None = None) -> str:
     """构建单只股票的评分 prompt"""
 
     rank_info = []
@@ -25,45 +32,64 @@ def build_score_prompt(stock_code: str, stock_name: str,
         rank_info.append(f"成交额排名第{vol_rank}")
     rank_str = "、".join(rank_info) if rank_info else "无排名信息"
 
-    vol_str = f"，成交额约{volume_yi}亿" if volume_yi else ""
-
-    # 量价指标
-    extra_lines = []
-    if turnover_rate is not None:
-        extra_lines.append(f"换手率：{turnover_rate}%")
-    if volume_ratio is not None:
-        extra_lines.append(f"量比：{volume_ratio}")
+    # 基础行情
+    data_lines = [f"最新价：{price}元，涨跌幅：{change_pct}%"]
+    if industry:
+        data_lines.append(f"所属行业：{industry}")
+    if volume_yi:
+        data_lines.append(f"成交额：{volume_yi}亿元")
+    if turnover_rate:
+        data_lines.append(f"换手率：{turnover_rate}%")
+    if volume_ratio:
+        data_lines.append(f"量比：{volume_ratio}")
+    if pe and pe > 0:
+        data_lines.append(f"市盈率(PE_TTM)：{pe:.1f}")
+    if pb and pb > 0:
+        data_lines.append(f"市净率(PB)：{pb:.2f}")
+    if mkt_cap_yi and mkt_cap_yi > 0:
+        data_lines.append(f"总市值：{mkt_cap_yi:.0f}亿元")
     if net_flow_wan is not None:
         flow_desc = f"+{net_flow_wan}" if net_flow_wan >= 0 else f"{net_flow_wan}"
-        extra_lines.append(f"主力净流入：{flow_desc}万元")
-    extra_str = "\n- ".join(extra_lines)
-    extra_block = f"\n- {extra_str}" if extra_str else ""
+        data_lines.append(f"今日主力净流入：{flow_desc}万元")
+
+    data_block = "\n- ".join(data_lines)
+
+    # K线技术面数据
+    kline_block = ""
+    if kline_summary:
+        kline_block = f"""
+
+## K线技术面数据（真实数据）
+{kline_summary}
+"""
 
     return f"""请对以下A股标的进行深度分析和评分：
 
 ## 股票信息
 - 股票：{stock_name}（{stock_code}）
-- 最新价：{price}元，涨跌幅：{change_pct}%{vol_str}
-- 今日排名：{rank_str}{extra_block}
+- 今日排名：{rank_str}
 
+## 实时行情数据
+- {data_block}
+{kline_block}
 ## 请从以下三个维度分析并评分（每项1-10分）：
 
 ### 1. 基本面（权重35%）
-- 公司主营业务及行业地位
-- 近期业绩（营收/利润增速）
-- 估值水平（PE/PB是否合理）
-- 财务健康度（负债率、现金流）
+- 公司主营业务及行业地位（行业：{industry or '请搜索确认'}）
+- 近期业绩表现（请搜索最新财报/业绩预告）
+- 估值水平（参考上方PE={pe or "N/A"}, PB={pb or "N/A"}，结合行业均值）
+- 财务健康度
 
 ### 2. 题材热度（权重35%）
 - 所属概念板块及题材正宗程度（是主业还是蹭概念）
 - 当前市场对该题材的关注度和持续性
-- 是否有近期催化剂（政策、事件、业绩）
+- 是否有近期催化剂（请搜索最新政策/事件/公告）
 - 题材的想象空间和天花板
 
 ### 3. 技术面/短线动能（权重30%）
-- 近期K线形态（是否有启动信号）
-- 量价配合情况
-- 均线系统状态（多头/空头/缠绕）
+- 量价配合（换手率{turnover_rate or "N/A"}%，量比{volume_ratio or "N/A"}）
+- 主力资金流向（今日净流入{net_flow_wan or "N/A"}万）
+- K线形态与均线系统（参考上方K线数据）
 - 短线支撑位和压力位
 
 ## 输出格式要求（严格按此格式）：

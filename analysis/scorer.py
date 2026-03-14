@@ -1,15 +1,20 @@
-"""逐只评分 + 排名"""
+"""逐只评分 + 排名（支持并行）"""
 
 import re
+import math
 import pandas as pd
-import streamlit as st
-from ai.client import call_ai, get_ai_client
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from ai.client import call_ai
 from ai.prompts_top10 import SYSTEM_SCORER, build_score_prompt
 
 
 def _parse_score(text: str) -> float:
     """从 AI 回复中提取综合评分"""
-    m = re.search(r"综合评分[：:]\s*(\d+\.?\d*)\s*/\s*10", text)
+    m = re.search(r"综合评分[：:]\s*[*]*(\d+\.?\d*)\s*/\s*10", text)
+    if m:
+        return float(m.group(1))
+    # 备用：匹配 **X.X/10** 格式
+    m = re.search(r"\*\*\s*(\d+\.?\d*)\s*/\s*10\s*\*\*", text)
     if m:
         return float(m.group(1))
     m = re.search(r"(\d+\.?\d*)\s*/\s*10", text)
@@ -22,6 +27,7 @@ def _parse_sub_scores(text: str) -> dict:
     """从 AI 回复中提取三项子评分"""
     scores = {}
     for label in ["基本面", "题材热度", "技术面"]:
+        # 匹配 "| 基本面 | 8/10 |" 或 "| 基本面 | 8.5/10 |"
         m = re.search(rf"{label}\s*\|\s*(\d+\.?\d*)\s*/\s*10", text)
         if m:
             scores[label] = float(m.group(1))
@@ -36,51 +42,50 @@ def _parse_advice(text: str) -> str:
     return ""
 
 
+def _safe_float(v):
+    if v is None:
+        return None
+    try:
+        val = float(v)
+        return None if math.isnan(val) else val
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int(v):
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return None
+
+
 def score_single_stock(client, cfg, row: pd.Series,
                        model_name: str = "") -> dict:
     """对单只股票进行 AI 评分，返回结果字典"""
     code = str(row.get("代码", ""))
     name = str(row.get("股票名称", ""))
-    price = row.get("最新价", 0)
-    change = row.get("涨跌幅", 0)
-    hot_rank = row.get("人气排名") if "人气排名" in row.index else None
-    vol_rank = row.get("成交额排名") if "成交额排名" in row.index else None
-    volume_yi = row.get("成交额(亿)") if "成交额(亿)" in row.index else None
-    turnover_rate = row.get("换手率") if "换手率" in row.index else None
-    volume_ratio = row.get("量比") if "量比" in row.index else None
-    net_flow_wan = row.get("主力净流入(万)") if "主力净流入(万)" in row.index else None
+    price = _safe_float(row.get("最新价", 0)) or 0.0
+    change = _safe_float(row.get("涨跌幅", 0)) or 0.0
+    hot_rank = _safe_int(row.get("人气排名") if "人气排名" in row.index else None)
+    vol_rank = _safe_int(row.get("成交额排名") if "成交额排名" in row.index else None)
+    volume_yi = _safe_float(row.get("成交额(亿)") if "成交额(亿)" in row.index else None)
+    turnover_rate = _safe_float(row.get("换手率") if "换手率" in row.index else None)
+    volume_ratio = _safe_float(row.get("量比") if "量比" in row.index else None)
+    net_flow_wan = _safe_float(row.get("主力净流入(万)") if "主力净流入(万)" in row.index else None)
+    pe = _safe_float(row.get("PE") if "PE" in row.index else None)
+    pb = _safe_float(row.get("PB") if "PB" in row.index else None)
+    mkt_cap_yi = _safe_float(row.get("总市值(亿)") if "总市值(亿)" in row.index else None)
+    industry = row.get("行业", "") if "行业" in row.index else None
+    kline_summary = row.get("K线摘要", "") if "K线摘要" in row.index else None
 
-    # 转换类型
-    def _safe_float(v):
-        if v is None:
-            return None
-        try:
-            import math
-            val = float(v)
-            return None if math.isnan(val) else val
-        except (ValueError, TypeError):
-            return None
-
-    def _safe_int(v):
-        if v is None:
-            return None
-        try:
-            return int(v)
-        except (ValueError, TypeError):
-            return None
-
-    price = _safe_float(price) or 0.0
-    change = _safe_float(change) or 0.0
-    hot_rank = _safe_int(hot_rank)
-    vol_rank = _safe_int(vol_rank)
-    volume_yi = _safe_float(volume_yi)
-    turnover_rate = _safe_float(turnover_rate)
-    volume_ratio = _safe_float(volume_ratio)
-    net_flow_wan = _safe_float(net_flow_wan)
-
-    prompt = build_score_prompt(code, name, price, change,
-                                hot_rank, vol_rank, volume_yi,
-                                turnover_rate, volume_ratio, net_flow_wan)
+    prompt = build_score_prompt(
+        code, name, price, change,
+        hot_rank, vol_rank, volume_yi,
+        turnover_rate, volume_ratio, net_flow_wan,
+        pe, pb, mkt_cap_yi, industry, kline_summary
+    )
     text, err = call_ai(client, cfg, prompt,
                         system=SYSTEM_SCORER, max_tokens=4000)
 
@@ -93,6 +98,7 @@ def score_single_stock(client, cfg, row: pd.Series,
         "股票名称": name,
         "最新价": price,
         "涨跌幅": change,
+        "行业": industry or "",
         "综合评分": score,
         "基本面": sub_scores.get("基本面"),
         "题材热度": sub_scores.get("题材热度"),
@@ -107,24 +113,42 @@ def score_single_stock(client, cfg, row: pd.Series,
 
 def score_all(client, cfg, df: pd.DataFrame,
               model_name: str = "",
-              progress_callback=None) -> pd.DataFrame:
-    """对整个候选池逐只评分，返回按评分排序的 DataFrame"""
+              progress_callback=None,
+              max_workers: int = 3) -> pd.DataFrame:
+    """对整个候选池并行评分，返回按评分排序的 DataFrame"""
     results = []
     total = len(df)
+    completed_count = 0
 
-    for i, (_, row) in enumerate(df.iterrows()):
-        if progress_callback:
-            progress_callback(i + 1, total,
-                              f"正在分析 {row['股票名称']}（{row['代码']}）...")
-        result = score_single_stock(client, cfg, row, model_name)
-        results.append(result)
+    def _score_row(idx_row):
+        _, row = idx_row
+        return score_single_stock(client, cfg, row, model_name)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_score_row, (idx, row)): row["股票名称"]
+            for idx, row in df.iterrows()
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            completed_count += 1
+            try:
+                result = future.result()
+                results.append(result)
+                if progress_callback:
+                    progress_callback(completed_count, total,
+                                      f"✅ {name} → {result['综合评分']}/10")
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(completed_count, total,
+                                      f"❌ {name} 分析失败：{e}")
 
     if not results:
         return pd.DataFrame()
 
     result_df = pd.DataFrame(results)
     result_df = result_df.sort_values("综合评分", ascending=False).reset_index(drop=True)
-    result_df.index = result_df.index + 1  # 排名从1开始
+    result_df.index = result_df.index + 1
     result_df.index.name = "推荐排名"
     return result_df
 
