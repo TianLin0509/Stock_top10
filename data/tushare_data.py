@@ -133,6 +133,115 @@ def _get_daily_basic_batch() -> pd.DataFrame:
     return pd.DataFrame()
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _get_daily_batch() -> tuple[pd.DataFrame, str]:
+    """批量获取当日全市场日线数据（含成交额），返回 (DataFrame, 交易日期)"""
+    if not _pro:
+        return pd.DataFrame(), ""
+    for offset in range(5):
+        trade_date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+        try:
+            df = _retry(lambda td=trade_date: _pro.daily(trade_date=td))
+            if df is not None and not df.empty:
+                df["code6"] = df["ts_code"].str.split(".").str[0]
+                return df, trade_date
+        except Exception:
+            continue
+    return pd.DataFrame(), ""
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _get_stock_names() -> dict:
+    """全市场股票名称 → {code6: name}"""
+    if not _pro:
+        return {}
+    try:
+        df = _retry(lambda: _pro.stock_basic(
+            exchange="", list_status="L", fields="symbol,name"
+        ))
+        if df is not None and not df.empty:
+            return dict(zip(df["symbol"], df["name"]))
+    except Exception:
+        pass
+    return {}
+
+
+def _sv(v, d=2):
+    """安全取值并四舍五入"""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return 0
+    return round(v, d)
+
+
+def get_volume_rank_tushare(top_n: int) -> tuple[pd.DataFrame, str | None]:
+    """Tushare 成交额排名 Top N"""
+    daily, td = _get_daily_batch()
+    if daily.empty:
+        return pd.DataFrame(), "Tushare 日线数据不可用"
+
+    top = daily.sort_values("amount", ascending=False).head(top_n).reset_index(drop=True)
+    names = _get_stock_names()
+    basic = _get_daily_basic_batch()
+
+    # 构建查找字典
+    tr_map, vr_map, pe_map, mv_map = {}, {}, {}, {}
+    if not basic.empty:
+        bi = basic.set_index("code6")
+        if "turnover_rate" in bi.columns: tr_map = bi["turnover_rate"].to_dict()
+        if "volume_ratio" in bi.columns: vr_map = bi["volume_ratio"].to_dict()
+        if "pe_ttm" in bi.columns: pe_map = bi["pe_ttm"].to_dict()
+        if "total_mv" in bi.columns: mv_map = bi["total_mv"].to_dict()
+
+    rows = []
+    for i, (_, r) in enumerate(top.iterrows(), 1):
+        code = r["code6"]
+        amt = r.get("amount", 0) or 0
+        mv = mv_map.get(code)
+        rows.append({
+            "排名": i, "代码": code,
+            "股票名称": names.get(code, ""),
+            "最新价": _sv(r.get("close")),
+            "涨跌幅": _sv(r.get("pct_chg")),
+            "成交额(亿)": round(amt / 1e5, 2),
+            "换手率": _sv(tr_map.get(code)),
+            "量比": _sv(vr_map.get(code)),
+            "市盈率": _sv(pe_map.get(code)),
+            "总市值(亿)": _sv(mv, 1) / 10000 if mv and pd.notna(mv) else 0,
+            "主力净流入(万)": 0,
+        })
+    return pd.DataFrame(rows), None
+
+
+def get_all_volume_data_tushare() -> pd.DataFrame:
+    """Tushare 全市场成交额排名数据"""
+    daily, td = _get_daily_batch()
+    if daily.empty:
+        return pd.DataFrame()
+
+    daily = daily.sort_values("amount", ascending=False).reset_index(drop=True)
+    basic = _get_daily_basic_batch()
+    basic_idx = basic.set_index("code6") if not basic.empty else pd.DataFrame()
+
+    result = pd.DataFrame({
+        "代码": daily["code6"].values,
+        "成交额排名_all": range(1, len(daily) + 1),
+        "成交额(亿)_all": (daily["amount"].fillna(0) / 1e5).round(2).values,
+    })
+
+    if not basic_idx.empty:
+        for src, dst in [("turnover_rate", "换手率_all"), ("volume_ratio", "量比_all")]:
+            if src in basic_idx.columns:
+                result[dst] = result["代码"].map(basic_idx[src].to_dict()).fillna(0).round(2)
+            else:
+                result[dst] = 0
+    else:
+        result["换手率_all"] = 0
+        result["量比_all"] = 0
+
+    result["主力净流入(万)_all"] = 0
+    return result
+
+
 def _get_kline_summary(code6: str) -> str:
     """获取单只股票K线摘要（MA状态+近期走势）"""
     if not _pro:

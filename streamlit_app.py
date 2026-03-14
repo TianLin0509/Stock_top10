@@ -108,51 +108,62 @@ with st.sidebar:
 # 主流程
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Step 1: 获取数据
+# Step 1: 获取数据（带进度条）
 st.markdown("### 📡 数据获取")
 
-col1, col2 = st.columns(2)
+_prog = st.progress(0, text="🐾 准备获取市场数据...")
 
+_prog.progress(0.05, text="🔥 正在获取人气榜数据...")
+hot_df, hot_err = get_hot_rank(top_n)
+
+_prog.progress(0.25, text="💰 正在获取成交额榜数据（优先 Tushare）...")
+vol_df, vol_err = get_volume_rank(top_n)
+
+_prog.progress(0.50, text="🔄 正在合并候选池并补充全市场数据...")
+merged = merge_candidates(hot_df, vol_df)
+
+_prog.progress(0.75, text="🔍 正在进行量化初筛...")
+before_count = len(merged)
+filtered = apply_filters(merged)
+after_count = len(filtered)
+
+_prog.progress(0.90, text="📊 正在获取板块轮动信号...")
+sectors = {}
+try:
+    from data.tushare_data import get_sector_rotation
+    sectors = get_sector_rotation()
+except Exception:
+    pass
+
+_prog.progress(1.0, text="🎉 数据加载完成！")
+time.sleep(0.3)
+_prog.empty()
+
+# 数据获取结果摘要
+col1, col2 = st.columns(2)
 with col1:
-    with st.spinner("加载人气榜..."):
-        hot_df, hot_err = get_hot_rank(top_n)
     if hot_err:
         st.warning(f"人气榜：{hot_err}")
     else:
         st.success(f"🔥 人气榜 Top {len(hot_df)}")
-
 with col2:
-    with st.spinner("加载成交额榜..."):
-        vol_df, vol_err = get_volume_rank(top_n)
     if vol_err:
         st.warning(f"成交额榜：{vol_err}")
     else:
         st.success(f"💰 成交额榜 Top {len(vol_df)}")
 
 # 板块轮动信号
-try:
-    from data.tushare_data import get_sector_rotation
-    sectors = get_sector_rotation()
-    if sectors.get("概念板块") or sectors.get("行业板块"):
-        with st.expander("📊 今日板块轮动", expanded=False):
-            sc1, sc2 = st.columns(2)
-            with sc1:
-                st.markdown("**🔥 概念板块 Top5**")
-                for s in sectors.get("概念板块", []):
-                    st.caption(s)
-            with sc2:
-                st.markdown("**🏭 行业板块 Top5**")
-                for s in sectors.get("行业板块", []):
-                    st.caption(s)
-except Exception:
-    pass
-
-# Step 2: 合并 + 初筛
-merged = merge_candidates(hot_df, vol_df)
-
-before_count = len(merged)
-filtered = apply_filters(merged)
-after_count = len(filtered)
+if sectors.get("概念板块") or sectors.get("行业板块"):
+    with st.expander("📊 今日板块轮动", expanded=False):
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            st.markdown("**🔥 概念板块 Top5**")
+            for s in sectors.get("概念板块", []):
+                st.caption(s)
+        with sc2:
+            st.markdown("**🏭 行业板块 Top5**")
+            for s in sectors.get("行业板块", []):
+                st.caption(s)
 
 if before_count > 0:
     st.caption(get_filter_summary(before_count, after_count))
@@ -160,7 +171,7 @@ if before_count > 0:
 # 限制分析数量
 candidates = filtered.head(max_analyze)
 
-# Step 3: 展示候选池（带来源着色）
+# Step 2: 展示候选池（带来源着色）
 with st.expander(f"📋 候选池（{len(candidates)} 只）", expanded=False):
     show_candidate_table(candidates)
 
