@@ -82,7 +82,20 @@ def show_top10_cards(df: pd.DataFrame):
             </div>"""
 
         sub_bars = _bar("基本面", s_fund, "#3b82f6") + _bar("题材", s_theme, "#f59e0b") + _bar("技术面", s_tech, "#22c55e")
-        sub_section = f'<div style="margin-top:8px;">{sub_bars}</div>' if sub_bars else ""
+
+        # 量化预评分标签
+        quant_total = row.get("量化总分")
+        quant_signal = row.get("量化信号", "")
+        quant_html = ""
+        if quant_total and not (isinstance(quant_total, float) and math.isnan(quant_total)):
+            q_color = "#16a34a" if quant_total >= 65 else "#f59e0b" if quant_total >= 50 else "#ef4444"
+            quant_html = f"""<div style="margin-top:6px; display:flex; align-items:center; gap:8px;">
+                <span style="font-size:0.72rem; color:#6b7280;">量化预评分</span>
+                <span style="background:{q_color}15; color:{q_color}; border-radius:4px;
+                    padding:1px 8px; font-size:0.72rem; font-weight:700;">{int(quant_total)}/100 {quant_signal}</span>
+            </div>"""
+
+        sub_section = f'<div style="margin-top:8px;">{sub_bars}{quant_html}</div>' if (sub_bars or quant_html) else ""
 
         st.markdown(f"""<div style="
             background: #fff;

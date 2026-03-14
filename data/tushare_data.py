@@ -242,10 +242,10 @@ def get_all_volume_data_tushare() -> pd.DataFrame:
     return result
 
 
-def _get_kline_summary(code6: str) -> str:
-    """获取单只股票K线摘要（MA状态+近期走势）"""
+def _get_kline_data(code6: str) -> pd.DataFrame:
+    """获取单只股票90日K线 DataFrame（供技术指标计算和摘要生成）"""
     if not _pro:
-        return ""
+        return pd.DataFrame()
     ts_code = to_ts_code(code6)
     try:
         df = _retry(lambda: _pro.daily(
@@ -254,53 +254,36 @@ def _get_kline_summary(code6: str) -> str:
             end_date=_today()
         ))
         if df is None or df.empty:
-            return ""
+            return pd.DataFrame()
         df = df.sort_values("trade_date").reset_index(drop=True)
         df = df.rename(columns={
             "trade_date": "日期", "open": "开盘", "high": "最高",
             "low": "最低", "close": "收盘", "vol": "成交量",
             "pct_chg": "涨跌幅", "amount": "成交额",
         })
-        return _price_summary(df)
+        return df
     except Exception:
-        return ""
+        return pd.DataFrame()
 
 
-def _price_summary(df: pd.DataFrame) -> str:
-    """生成K线数据文本摘要"""
+def _get_kline_summary(code6: str) -> str:
+    """获取单只股票K线摘要（含技术指标）"""
+    df = _get_kline_data(code6)
     if df.empty:
         return ""
-    d = df.copy()
-    for p in [5, 20, 60]:
-        d[f"MA{p}"] = d["收盘"].rolling(p).mean()
-    lt = d.iloc[-1]
 
-    def pct(n):
-        if len(d) <= n:
-            return "N/A"
-        return f"{(d.iloc[-1]['收盘'] / d.iloc[-n]['收盘'] - 1) * 100:.2f}%"
+    from analysis.signal import compute_technicals, format_technicals_text
 
-    ma5 = lt.get("MA5")
-    ma20 = lt.get("MA20")
-    ma60 = lt.get("MA60")
-    if pd.notna(ma5) and pd.notna(ma20) and pd.notna(ma60):
-        ma_arr = ("多头排列↑" if ma5 > ma20 > ma60
-                  else "空头排列↓" if ma5 < ma20 < ma60
-                  else "均线纠缠~")
-        ma_line = f"MA5={ma5:.2f} MA20={ma20:.2f} MA60={ma60:.2f} → {ma_arr}"
-    else:
-        ma_line = "均线数据不足"
+    # 量化技术指标
+    technicals = compute_technicals(df)
+    tech_text = format_technicals_text(technicals)
 
-    lines = [
-        f"最新收盘: {lt['收盘']:.2f}元",
-        f"近期涨幅 5日:{pct(5)} 20日:{pct(20)} 60日:{pct(60)}",
-        ma_line,
-    ]
-    if len(d) >= 20:
-        lines.append(f"20日区间: 最高{d.tail(20)['最高'].max():.2f} / 最低{d.tail(20)['最低'].min():.2f}")
+    # 近5日行情明细
+    recent = df.tail(5)[["日期", "收盘", "涨跌幅", "成交量"]].to_string(index=False)
 
-    # 近5日数据
-    recent = d.tail(5)[["日期", "收盘", "涨跌幅", "成交量"]].to_string(index=False)
+    lines = [f"最新收盘: {df.iloc[-1]['收盘']:.2f}元"]
+    if tech_text:
+        lines.append(tech_text)
     lines.extend(["", "近5日行情：", recent])
     return "\n".join(lines)
 
@@ -355,23 +338,108 @@ def enrich_candidates(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
             )
             enriched.drop(columns=["量比_ts"], inplace=True)
 
-    # 3. 并行获取K线摘要
+    # 3. 行业PE/PB基准
     if progress_callback:
-        progress_callback("正在获取K线数据...")
+        progress_callback("正在计算行业估值基准...")
+    industry_benchmarks = _get_industry_benchmarks(basic_df)
+    if industry_benchmarks and "行业" in enriched.columns:
+        enriched["行业PE均值"] = enriched["行业"].map(
+            {k: v.get("pe_mean") for k, v in industry_benchmarks.items()})
+        enriched["行业PB均值"] = enriched["行业"].map(
+            {k: v.get("pb_mean") for k, v in industry_benchmarks.items()})
+
+    # 4. 并行获取K线数据 + 技术指标
+    if progress_callback:
+        progress_callback("正在获取K线数据并计算技术指标...")
+
+    from analysis.signal import compute_technicals, compute_quant_score, format_technicals_text
 
     kline_results = {}
+    kline_dfs = {}
     with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_get_kline_summary, code): code for code in codes}
+        futures = {pool.submit(_get_kline_data, code): code for code in codes}
         for future in as_completed(futures):
             code = futures[future]
             try:
-                kline_results[code] = future.result()
+                kdf = future.result()
+                kline_dfs[code] = kdf
+                if not kdf.empty:
+                    technicals = compute_technicals(kdf)
+                    kline_results[code] = {
+                        "summary": format_technicals_text(technicals) + "\n\n近5日行情：\n" +
+                                   kdf.tail(5)[["日期", "收盘", "涨跌幅", "成交量"]].to_string(index=False),
+                        "technicals": technicals,
+                    }
+                else:
+                    kline_results[code] = {"summary": "", "technicals": {}}
             except Exception:
-                kline_results[code] = ""
+                kline_results[code] = {"summary": "", "technicals": {}}
 
-    enriched["K线摘要"] = enriched["代码"].map(kline_results)
+    enriched["K线摘要"] = enriched["代码"].map(
+        {k: v["summary"] for k, v in kline_results.items()})
+
+    # 5. 量化预评分
+    if progress_callback:
+        progress_callback("正在计算量化预评分...")
+
+    quant_scores = {}
+    for _, row in enriched.iterrows():
+        code = row["代码"]
+        tech = kline_results.get(code, {}).get("technicals", {})
+        qs = compute_quant_score(
+            tech,
+            pe=row.get("PE"),
+            pb=row.get("PB"),
+            net_flow_wan=row.get("主力净流入(万)"),
+            volume_ratio=row.get("量比"),
+            turnover_rate=row.get("换手率"),
+        )
+        quant_scores[code] = qs
+
+    enriched["量化总分"] = enriched["代码"].map(
+        {k: v["量化总分"] for k, v in quant_scores.items()})
+    enriched["量化信号"] = enriched["代码"].map(
+        {k: v["量化信号"] for k, v in quant_scores.items()})
+    enriched["技术面分"] = enriched["代码"].map(
+        {k: v["技术面分"] for k, v in quant_scores.items()})
+    enriched["资金面分"] = enriched["代码"].map(
+        {k: v["资金面分"] for k, v in quant_scores.items()})
+    enriched["估值面分"] = enriched["代码"].map(
+        {k: v["估值面分"] for k, v in quant_scores.items()})
+    enriched["动量分"] = enriched["代码"].map(
+        {k: v["动量分"] for k, v in quant_scores.items()})
 
     return enriched
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _get_industry_benchmarks(basic_df: pd.DataFrame = None) -> dict:
+    """计算各行业PE/PB均值基准"""
+    if basic_df is None or basic_df.empty:
+        return {}
+    try:
+        industry_map = _get_stock_industry()
+        if not industry_map:
+            return {}
+        basic_df = basic_df.copy()
+        basic_df["industry"] = basic_df["code6"].map(industry_map)
+        basic_df = basic_df.dropna(subset=["industry"])
+
+        result = {}
+        for industry, group in basic_df.groupby("industry"):
+            pe_vals = group["pe_ttm"].dropna()
+            pb_vals = group["pb"].dropna()
+            # 去掉极端值（PE < 0 或 > 300）
+            pe_vals = pe_vals[(pe_vals > 0) & (pe_vals < 300)]
+            pb_vals = pb_vals[(pb_vals > 0) & (pb_vals < 50)]
+            if len(pe_vals) >= 5:
+                result[industry] = {
+                    "pe_mean": round(float(pe_vals.median()), 1),
+                    "pb_mean": round(float(pb_vals.median()), 2) if len(pb_vals) >= 5 else None,
+                }
+        return result
+    except Exception:
+        return {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -1,12 +1,19 @@
-"""Prompt 模板 — Top10 选股分析"""
+"""Prompt 模板 — Top10 选股分析（增强版）"""
 
 
 SYSTEM_SCORER = (
-    "你是一位顶级A股短线投资顾问，擅长从基本面、题材热度、技术面三个维度筛选优质标的。"
-    "你的分析风格：数据驱动、逻辑清晰、敢于给出明确评分和结论。"
-    "评分标准偏好：基本面扎实 + 题材正宗（不是蹭概念）+ 短期有明显启动趋势（放量突破、均线多头等）。"
-    "重要：下方提供的行情数据和K线数据是准确的实时数据，请以此为基础分析。"
-    "对于近期新闻、公告等信息，请结合联网搜索结果判断。"
+    "你是一位顶级A股短线投资顾问，拥有20年实战经验，擅长从基本面、题材热度、技术面三个维度筛选优质标的。\n"
+    "你的投资哲学（必须严格遵守）：\n"
+    "1. 基本面扎实：ROE较高、营收/利润持续增长、现金流健康、负债合理\n"
+    "2. 题材正宗：公司主业就是受益于该题材（不是蹭概念），有明确催化剂\n"
+    "3. 技术面启动：放量突破、均线多头排列、MACD金叉等明确的短期启动信号\n"
+    "4. 三者缺一不可：如果某一维度明显不达标（<4分），综合评分不应超过6分\n\n"
+    "重要规则：\n"
+    "- 下方提供的行情数据、K线技术指标、量化预评分是精确的实时数据，必须以此为基础分析\n"
+    "- 对于近期新闻、财报、公告等信息，请结合联网搜索结果判断\n"
+    "- 评分要有区分度：优秀标的8-9分，一般的5-6分，差的3-4分。不要扎堆在6-7分\n"
+    "- 警惕短期涨幅过大的股票（连续大涨后追高风险大）\n"
+    "- 关注量价配合：放量上涨好于缩量上涨，缩量下跌好于放量下跌\n"
 )
 
 
@@ -22,8 +29,11 @@ def build_score_prompt(stock_code: str, stock_name: str,
                        pb: float | None = None,
                        mkt_cap_yi: float | None = None,
                        industry: str | None = None,
-                       kline_summary: str | None = None) -> str:
-    """构建单只股票的评分 prompt"""
+                       kline_summary: str | None = None,
+                       industry_pe: float | None = None,
+                       industry_pb: float | None = None,
+                       quant_score: dict | None = None) -> str:
+    """构建单只股票的评分 prompt（增强版）"""
 
     rank_info = []
     if hot_rank is not None:
@@ -43,9 +53,17 @@ def build_score_prompt(stock_code: str, stock_name: str,
     if volume_ratio:
         data_lines.append(f"量比：{volume_ratio}")
     if pe and pe > 0:
-        data_lines.append(f"市盈率(PE_TTM)：{pe:.1f}")
+        pe_line = f"市盈率(PE_TTM)：{pe:.1f}"
+        if industry_pe:
+            pe_vs = "低于" if pe < industry_pe else "高于"
+            pe_line += f"（行业中位数：{industry_pe}，{pe_vs}行业）"
+        data_lines.append(pe_line)
     if pb and pb > 0:
-        data_lines.append(f"市净率(PB)：{pb:.2f}")
+        pb_line = f"市净率(PB)：{pb:.2f}"
+        if industry_pb:
+            pb_vs = "低于" if pb < industry_pb else "高于"
+            pb_line += f"（行业中位数：{industry_pb}，{pb_vs}行业）"
+        data_lines.append(pb_line)
     if mkt_cap_yi and mkt_cap_yi > 0:
         data_lines.append(f"总市值：{mkt_cap_yi:.0f}亿元")
     if net_flow_wan is not None:
@@ -59,8 +77,22 @@ def build_score_prompt(stock_code: str, stock_name: str,
     if kline_summary:
         kline_block = f"""
 
-## K线技术面数据（真实数据）
+## K线技术指标（精确计算值，请重点参考）
 {kline_summary}
+"""
+
+    # 量化预评分
+    quant_block = ""
+    if quant_score:
+        quant_block = f"""
+
+## 量化预评分（系统自动计算，仅供参考）
+- 技术面分：{quant_score.get('技术面分', 'N/A')}/100
+- 资金面分：{quant_score.get('资金面分', 'N/A')}/100
+- 估值面分：{quant_score.get('估值面分', 'N/A')}/100
+- 动量分：{quant_score.get('动量分', 'N/A')}/100
+- 量化总分：{quant_score.get('量化总分', 'N/A')}/100 → {quant_score.get('量化信号', '')}
+（注意：量化分仅基于数值计算，你需要结合基本面定性分析、题材逻辑、最新消息等综合判断）
 """
 
     return f"""请对以下A股标的进行深度分析和评分：
@@ -71,26 +103,34 @@ def build_score_prompt(stock_code: str, stock_name: str,
 
 ## 实时行情数据
 - {data_block}
-{kline_block}
+{kline_block}{quant_block}
 ## 请从以下三个维度分析并评分（每项1-10分）：
 
 ### 1. 基本面（权重35%）
-- 公司主营业务及行业地位（行业：{industry or '请搜索确认'}）
-- 近期业绩表现（请搜索最新财报/业绩预告）
-- 估值水平（参考上方PE={pe or "N/A"}, PB={pb or "N/A"}，结合行业均值）
-- 财务健康度
+请搜索该公司最新信息，评估以下要点：
+- **主营业务与行业地位**：是否为细分行业龙头或核心供应商
+- **近期业绩**：最新财报/业绩预告，营收和利润增速如何
+- **盈利质量**：ROE水平（>15%为优秀）、经营现金流是否覆盖利润
+- **估值合理性**：当前PE={pe or "N/A"}（行业中位数{industry_pe or "需搜索"}），PB={pb or "N/A"}（行业中位数{industry_pb or "需搜索"}）
+- **财务风险**：负债率、商誉占比、大股东质押等
+- **一票否决项**：若存在 ST风险/业绩暴雷/重大违规/高质押，此项最高4分
 
 ### 2. 题材热度（权重35%）
-- 所属概念板块及题材正宗程度（是主业还是蹭概念）
-- 当前市场对该题材的关注度和持续性
-- 是否有近期催化剂（请搜索最新政策/事件/公告）
-- 题材的想象空间和天花板
+请搜索最新新闻和政策，评估以下要点：
+- **题材正宗程度**：公司主业是否直接受益（产品/技术/客户关系），而非蹭概念
+- **催化剂**：近期是否有政策利好、订单公告、行业事件等明确催化
+- **市场关注度**：板块整体热度、龙头股表现、资金持续性
+- **想象空间**：市场空间天花板、公司弹性
+- **一票否决项**：若纯属蹭概念/已被证伪/题材已末期，此项最高4分
 
 ### 3. 技术面/短线动能（权重30%）
-- 量价配合（换手率{turnover_rate or "N/A"}%，量比{volume_ratio or "N/A"}）
-- 主力资金流向（今日净流入{net_flow_wan or "N/A"}万）
-- K线形态与均线系统（参考上方K线数据）
-- 短线支撑位和压力位
+基于上方精确技术指标数据分析：
+- **均线系统**：是否多头排列？价格与MA20的关系
+- **量价配合**：量比、换手率、近期量能变化趋势
+- **MACD/RSI**：是否金叉？RSI是否在合理区间（40-70为宜）
+- **关键位置**：距近期高点位置、是否突破重要压力位
+- **主力资金**：今日净流入方向和力度
+- **一票否决项**：若空头排列+缩量下跌+MACD死叉，此项最高4分
 
 ## 输出格式要求（严格按此格式）：
 
@@ -98,15 +138,16 @@ def build_score_prompt(stock_code: str, stock_name: str,
 
 | 维度 | 评分 | 关键依据 |
 |------|------|----------|
-| 基本面 | X/10 | 一句话总结 |
-| 题材热度 | X/10 | 一句话总结 |
-| 技术面 | X/10 | 一句话总结 |
+| 基本面 | X/10 | 一句话总结（含具体数据） |
+| 题材热度 | X/10 | 一句话总结（指出具体题材和催化剂） |
+| 技术面 | X/10 | 一句话总结（引用具体技术指标） |
 
-**核心逻辑：**（2-3句话说明为什么值得/不值得关注）
+**核心逻辑：**（2-3句话，必须包含具体的数据或事实支撑）
 
-**风险提示：**（1-2个主要风险点）
+**主要风险：**（2个风险点，具体化）
 
-**短线建议：**（明确给出：强烈推荐/推荐/观望/回避）"""
+**短线建议：**（明确给出：强烈推荐/推荐/观望/回避）
+**建议仓位：**（轻仓试探/标准仓位/重仓参与）"""
 
 
 SYSTEM_SUMMARY = (

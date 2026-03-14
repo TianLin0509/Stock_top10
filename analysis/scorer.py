@@ -13,7 +13,6 @@ def _parse_score(text: str) -> float:
     m = re.search(r"综合评分[：:]\s*[*]*(\d+\.?\d*)\s*/\s*10", text)
     if m:
         return float(m.group(1))
-    # 备用：匹配 **X.X/10** 格式
     m = re.search(r"\*\*\s*(\d+\.?\d*)\s*/\s*10\s*\*\*", text)
     if m:
         return float(m.group(1))
@@ -27,7 +26,6 @@ def _parse_sub_scores(text: str) -> dict:
     """从 AI 回复中提取三项子评分"""
     scores = {}
     for label in ["基本面", "题材热度", "技术面"]:
-        # 匹配 "| 基本面 | 8/10 |" 或 "| 基本面 | 8.5/10 |"
         m = re.search(rf"{label}\s*\|\s*(\d+\.?\d*)\s*/\s*10", text)
         if m:
             scores[label] = float(m.group(1))
@@ -80,11 +78,28 @@ def score_single_stock(client, cfg, row: pd.Series,
     industry = row.get("行业", "") if "行业" in row.index else None
     kline_summary = row.get("K线摘要", "") if "K线摘要" in row.index else None
 
+    # 新增：行业基准
+    industry_pe = _safe_float(row.get("行业PE均值") if "行业PE均值" in row.index else None)
+    industry_pb = _safe_float(row.get("行业PB均值") if "行业PB均值" in row.index else None)
+
+    # 新增：量化预评分
+    quant_score = None
+    if "量化总分" in row.index and row.get("量化总分") is not None:
+        quant_score = {
+            "技术面分": _safe_int(row.get("技术面分")),
+            "资金面分": _safe_int(row.get("资金面分")),
+            "估值面分": _safe_int(row.get("估值面分")),
+            "动量分": _safe_int(row.get("动量分")),
+            "量化总分": _safe_int(row.get("量化总分")),
+            "量化信号": row.get("量化信号", ""),
+        }
+
     prompt = build_score_prompt(
         code, name, price, change,
         hot_rank, vol_rank, volume_yi,
         turnover_rate, volume_ratio, net_flow_wan,
-        pe, pb, mkt_cap_yi, industry, kline_summary
+        pe, pb, mkt_cap_yi, industry, kline_summary,
+        industry_pe, industry_pb, quant_score
     )
     text, err = call_ai(client, cfg, prompt,
                         system=SYSTEM_SCORER, max_tokens=4000)
@@ -108,6 +123,8 @@ def score_single_stock(client, cfg, row: pd.Series,
         "模型": model_name,
         "人气排名": hot_rank,
         "成交额排名": vol_rank,
+        "量化总分": _safe_int(row.get("量化总分")) if "量化总分" in row.index else None,
+        "量化信号": row.get("量化信号", "") if "量化信号" in row.index else "",
     }
 
 
@@ -135,9 +152,11 @@ def score_all(client, cfg, df: pd.DataFrame,
             try:
                 result = future.result()
                 results.append(result)
+                qs = result.get("量化总分", "")
+                qs_str = f"(量化{qs})" if qs else ""
                 if progress_callback:
                     progress_callback(completed_count, total,
-                                      f"✅ {name} → {result['综合评分']}/10")
+                                      f"✅ {name} → {result['综合评分']}/10 {qs_str}")
             except Exception as e:
                 if progress_callback:
                     progress_callback(completed_count, total,
