@@ -14,11 +14,14 @@ from ai.client import get_token_usage, reset_token_usage
 from data.hot_rank import get_hot_rank, get_volume_rank, merge_candidates
 from data.stock_filter import apply_filters, get_filter_summary
 from analysis.runner import (
-    get_cached_result, get_cached_summary, is_running, is_done,
-    get_job, start_scoring,
+    get_cached_result, get_cached_summary, get_all_cached_models,
+    is_running, is_done, get_job, start_scoring,
 )
 from ui.styles import inject_css
-from ui.cards import show_top10_cards, show_score_table, show_progress
+from ui.cards import (
+    show_top10_cards, show_score_table, show_candidate_table,
+    show_consensus, show_progress,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -67,7 +70,6 @@ with st.sidebar:
     st.markdown("### 📊 数据来源")
     st.caption("🔥 东方财富人气榜")
     st.caption("💰 东方财富成交额榜")
-    # Tushare 状态
     try:
         from data.tushare_data import get_ts_status
         st.caption(f"📈 {get_ts_status()}")
@@ -127,6 +129,24 @@ with col2:
     else:
         st.success(f"💰 成交额榜 Top {len(vol_df)}")
 
+# 板块轮动信号
+try:
+    from data.tushare_data import get_sector_rotation
+    sectors = get_sector_rotation()
+    if sectors.get("概念板块") or sectors.get("行业板块"):
+        with st.expander("📊 今日板块轮动", expanded=False):
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                st.markdown("**🔥 概念板块 Top5**")
+                for s in sectors.get("概念板块", []):
+                    st.caption(s)
+            with sc2:
+                st.markdown("**🏭 行业板块 Top5**")
+                for s in sectors.get("行业板块", []):
+                    st.caption(s)
+except Exception:
+    pass
+
 # Step 2: 合并 + 初筛
 merged = merge_candidates(hot_df, vol_df)
 
@@ -140,17 +160,9 @@ if before_count > 0:
 # 限制分析数量
 candidates = filtered.head(max_analyze)
 
-# Step 3: 展示候选池
+# Step 3: 展示候选池（带来源着色）
 with st.expander(f"📋 候选池（{len(candidates)} 只）", expanded=False):
-    if not candidates.empty:
-        display_cols = [c for c in ["代码", "股票名称", "最新价", "涨跌幅", "来源",
-                                     "人气排名", "成交额排名", "成交额(亿)",
-                                     "换手率", "量比", "市盈率", "总市值(亿)",
-                                     "主力净流入(万)"]
-                        if c in candidates.columns]
-        st.dataframe(candidates[display_cols], use_container_width=True, hide_index=True)
-    else:
-        st.warning("候选池为空，无法进行分析")
+    show_candidate_table(candidates)
 
 st.markdown("---")
 
@@ -159,8 +171,37 @@ st.markdown("### 🤖 AI 深度分析")
 
 
 def _show_results(result_df, summary_text=""):
-    """展示分析结果 + 邮件发送按钮"""
+    """展示分析结果 + 导出 + 邮件"""
     show_top10_cards(result_df)
+
+    # 导出 + 完整评分表
+    col_export, col_table = st.columns([1, 1])
+    with col_export:
+        # CSV 导出按钮
+        csv_cols = [c for c in ["代码", "股票名称", "行业", "最新价", "涨跌幅",
+                                 "基本面", "题材热度", "技术面", "综合评分",
+                                 "短线建议", "模型"]
+                    if c in result_df.columns]
+        csv_data = result_df[csv_cols].to_csv(index=True, encoding="utf-8-sig")
+        from datetime import date as _date
+        st.download_button(
+            "📥 导出 CSV",
+            csv_data,
+            file_name=f"top10_{_date.today().isoformat()}.csv",
+            mime="text/csv",
+        )
+    with col_table:
+        if email_addr:
+            if st.button("📧 发送报告到邮箱", key="send_email"):
+                with st.spinner("正在发送..."):
+                    from utils.email_sender import send_report_email
+                    ok, msg = send_report_email(email_addr, result_df,
+                                                summary_text, model_name)
+                    if ok:
+                        st.success(f"✅ 已发送至 {email_addr}")
+                    else:
+                        st.error(msg)
+
     with st.expander("📊 完整评分表", expanded=False):
         show_score_table(result_df)
 
@@ -169,17 +210,28 @@ def _show_results(result_df, summary_text=""):
         st.markdown("### 📝 每日总结报告")
         st.markdown(summary_text)
 
-    # 邮件发送
-    if email_addr:
-        if st.button("📧 发送报告到邮箱", key="send_email"):
-            with st.spinner("正在发送..."):
-                from utils.email_sender import send_report_email
-                ok, msg = send_report_email(email_addr, result_df,
-                                            summary_text, model_name)
-                if ok:
-                    st.success(f"✅ 报告已发送至 {email_addr}")
-                else:
-                    st.error(msg)
+    # 多模型共识分析
+    cached_models = get_all_cached_models()
+    if len(cached_models) >= 2:
+        st.markdown("---")
+        st.markdown("### 🤝 多模型共识分析")
+        cached_results = {}
+        for m in cached_models:
+            # 找到对应的 display name
+            for display_name in MODEL_NAMES:
+                if m in display_name or display_name.split("·")[-1].strip() in m:
+                    r = get_cached_result(display_name)
+                    if r is not None and not r.empty:
+                        cached_results[display_name] = r
+                    break
+            else:
+                r = get_cached_result(m)
+                if r is not None and not r.empty:
+                    cached_results[m] = r
+        if len(cached_results) >= 2:
+            show_consensus(cached_results)
+        else:
+            st.info(f"今日已有 {len(cached_models)} 个模型的缓存，切换模型查看共识")
 
 
 # 检查缓存

@@ -263,3 +263,40 @@ def enrich_candidates(df: pd.DataFrame, progress_callback=None) -> pd.DataFrame:
     enriched["K线摘要"] = enriched["代码"].map(kline_results)
 
     return enriched
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 板块轮动信号
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_sector_rotation() -> dict:
+    """获取今日板块轮动信号：概念板块涨幅Top5 + 行业板块涨幅Top5"""
+    result = {"概念板块": [], "行业板块": []}
+    try:
+        import akshare as ak
+        # 概念板块
+        df_concept = ak.stock_board_concept_name_em()
+        if df_concept is not None and not df_concept.empty:
+            # 按涨跌幅排序，取 Top5
+            if "涨跌幅" in df_concept.columns:
+                df_concept["涨跌幅"] = pd.to_numeric(df_concept["涨跌幅"], errors="coerce")
+                top5 = df_concept.nlargest(5, "涨跌幅")
+                for _, row in top5.iterrows():
+                    name = row.get("板块名称", "")
+                    chg = row.get("涨跌幅", 0)
+                    result["概念板块"].append(f"{name}({chg:+.2f}%)")
+
+        # 行业板块
+        df_industry = ak.stock_board_industry_name_em()
+        if df_industry is not None and not df_industry.empty:
+            if "涨跌幅" in df_industry.columns:
+                df_industry["涨跌幅"] = pd.to_numeric(df_industry["涨跌幅"], errors="coerce")
+                top5 = df_industry.nlargest(5, "涨跌幅")
+                for _, row in top5.iterrows():
+                    name = row.get("板块名称", "")
+                    chg = row.get("涨跌幅", 0)
+                    result["行业板块"].append(f"{name}({chg:+.2f}%)")
+    except Exception:
+        pass
+    return result

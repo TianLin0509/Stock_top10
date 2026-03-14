@@ -1,5 +1,7 @@
 """后台分析调度 — 数据增强 + 并行评分"""
 
+import json
+import os
 import threading
 from datetime import date
 import pandas as pd
@@ -10,8 +12,12 @@ from analysis.scorer import score_all
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 每日缓存
+# 持久化缓存（session_state + JSON 文件双重保险）
 # ══════════════════════════════════════════════════════════════════════════════
+
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
+os.makedirs(_CACHE_DIR, exist_ok=True)
+
 
 def _cache_key(model_name: str) -> str:
     return f"top10_result_{date.today().isoformat()}_{model_name}"
@@ -21,18 +27,72 @@ def _summary_key(model_name: str) -> str:
     return f"top10_summary_{date.today().isoformat()}_{model_name}"
 
 
+def _file_path(model_name: str) -> str:
+    return os.path.join(_CACHE_DIR, f"{date.today().isoformat()}_{model_name}.json")
+
+
 def get_cached_result(model_name: str) -> pd.DataFrame | None:
-    return st.session_state.get(_cache_key(model_name))
+    """优先读 session_state，否则读文件"""
+    key = _cache_key(model_name)
+    if key in st.session_state:
+        return st.session_state[key]
+    # 尝试读文件
+    fp = _file_path(model_name)
+    if os.path.exists(fp):
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            df = pd.DataFrame(data["results"])
+            df.index = df.index + 1
+            df.index.name = "推荐排名"
+            st.session_state[key] = df
+            skey = _summary_key(model_name)
+            if "summary" in data:
+                st.session_state[skey] = data["summary"]
+            return df
+        except Exception:
+            pass
+    return None
 
 
 def get_cached_summary(model_name: str) -> str | None:
-    return st.session_state.get(_summary_key(model_name))
+    skey = _summary_key(model_name)
+    if skey in st.session_state:
+        return st.session_state[skey]
+    # 触发文件读取（会同时加载 summary）
+    get_cached_result(model_name)
+    return st.session_state.get(skey)
 
 
 def save_cached_result(model_name: str, df: pd.DataFrame, summary: str = ""):
     st.session_state[_cache_key(model_name)] = df
     if summary:
         st.session_state[_summary_key(model_name)] = summary
+    # 写入文件持久化
+    try:
+        # 只保存可序列化的列
+        save_cols = [c for c in df.columns if c != "K线摘要"]
+        data = {
+            "results": df[save_cols].to_dict(orient="records"),
+            "summary": summary,
+            "model": model_name,
+            "date": date.today().isoformat(),
+        }
+        with open(_file_path(model_name), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        pass
+
+
+def get_all_cached_models() -> list[str]:
+    """获取今日所有已缓存的模型名称"""
+    today_str = date.today().isoformat()
+    models = []
+    for fn in os.listdir(_CACHE_DIR):
+        if fn.startswith(today_str) and fn.endswith(".json"):
+            model = fn[len(today_str) + 1:-5]  # 去掉日期前缀和.json
+            models.append(model)
+    return models
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -121,6 +181,18 @@ def start_scoring(ss, candidates_df: pd.DataFrame, model_name: str):
                             f"短线建议:{r.get('短线建议','未知')}")
                     stock_lines.append(line)
                 stocks_text = "\n".join(stock_lines)
+
+                # 加入板块轮动信号
+                try:
+                    from data.tushare_data import get_sector_rotation
+                    sectors = get_sector_rotation()
+                    if sectors.get("概念板块"):
+                        stocks_text += "\n\n今日概念板块涨幅Top5：" + "、".join(sectors["概念板块"])
+                    if sectors.get("行业板块"):
+                        stocks_text += "\n今日行业板块涨幅Top5：" + "、".join(sectors["行业板块"])
+                except Exception:
+                    pass
+
                 summary_prompt = build_summary_prompt(stocks_text, total)
                 summary, s_err = call_ai(
                     client, cfg, summary_prompt,

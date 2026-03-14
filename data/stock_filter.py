@@ -20,14 +20,16 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     mask_bj = filtered["代码"].str.startswith("8")
     filtered = filtered[~mask_bj]
 
-    # 3. 排除涨跌幅异常 — 涨停或跌停的追高风险大
-    # 涨跌幅 > 9.8% 可能是涨停，< -9.8% 是跌停
+    # 3. 排除跌停股（按板块区分涨跌幅限制）
     if "涨跌幅" in filtered.columns:
         filtered["涨跌幅"] = pd.to_numeric(filtered["涨跌幅"], errors="coerce")
-        # 不排除涨停，因为人气榜里涨停股可能有连板预期
-        # 但排除跌停股
-        mask_down_limit = filtered["涨跌幅"] < -9.5
-        filtered = filtered[~mask_down_limit]
+        # 科创板(688)和创业板(300): 20%涨跌幅 → 跌停阈值-19.5%
+        # 主板: 10%涨跌幅 → 跌停阈值-9.5%
+        is_20pct = (filtered["代码"].str.startswith("688") |
+                    filtered["代码"].str.startswith("300"))
+        mask_down = ((is_20pct & (filtered["涨跌幅"] < -19.5)) |
+                     (~is_20pct & (filtered["涨跌幅"] < -9.5)))
+        filtered = filtered[~mask_down]
 
     # 4. 排除价格过低 (< 2元) 的低价股 — 基本面差
     if "最新价" in filtered.columns:
