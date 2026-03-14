@@ -56,7 +56,7 @@ st.markdown("""<div class="app-header">
 
 with st.sidebar:
     st.markdown("### ⚙️ 设置")
-    model_name = st.selectbox("AI 模型", MODEL_NAMES, index=2,
+    model_name = st.selectbox("AI 模型", MODEL_NAMES, index=3,
                               help="选择用于深度分析的 AI 模型")
     cfg = MODEL_CONFIGS.get(model_name, {})
     st.caption(f"📌 {cfg.get('note', '')}")
