@@ -1,19 +1,10 @@
-"""量化预评分 — 四维信号计算（技术面、资金面、基本面、动量）
-
-在 AI 评分之前，先用纯量化方式对候选股票进行预评分，
-将结果作为参考数据传给 AI，提升评分准确性。
-"""
+"""量化预评分 — 四维信号计算（技术面、资金面、基本面、动量）"""
 
 import pandas as pd
 import numpy as np
 
 
 def compute_technicals(df: pd.DataFrame) -> dict:
-    """从 K 线 DataFrame 计算技术指标
-
-    参数: df 需包含 收盘, 最高, 最低, 成交量 列，按日期升序
-    返回: 技术指标字典
-    """
     if df.empty or len(df) < 20:
         return {}
 
@@ -72,7 +63,6 @@ def compute_technicals(df: pd.DataFrame) -> dict:
         result["MACD_DIF"] = round(float(dif.iloc[-1]), 3)
         result["MACD_DEA"] = round(float(dea.iloc[-1]), 3)
         result["MACD柱"] = round(float(macd_bar.iloc[-1]), 3)
-        # 金叉/死叉判断
         if len(dif) >= 2:
             if dif.iloc[-1] > dea.iloc[-1] and dif.iloc[-2] <= dea.iloc[-2]:
                 result["MACD信号"] = "金叉"
@@ -92,7 +82,6 @@ def compute_technicals(df: pd.DataFrame) -> dict:
         result["布林上轨"] = round(float(upper), 2)
         result["布林中轨"] = round(float(ma20_val), 2)
         result["布林下轨"] = round(float(lower), 2)
-        # 当前价在布林带中的位置 (0=下轨, 100=上轨)
         boll_width = upper - lower
         if boll_width > 0:
             pos = (close[-1] - lower) / boll_width * 100
@@ -126,7 +115,6 @@ def compute_technicals(df: pd.DataFrame) -> dict:
             result["60日最高"] = round(float(np.max(high[-60:])), 2)
             result["60日最低"] = round(float(np.min(low[-60:])), 2)
 
-        # 距离20日高点的位置
         if recent_20_high > 0:
             dist_high = (close[-1] - recent_20_high) / recent_20_high * 100
             result["距20日高点"] = f"{dist_high:+.1f}%"
@@ -150,11 +138,6 @@ def compute_quant_score(technicals: dict, pe: float = None,
                         pb: float = None, net_flow_wan: float = None,
                         volume_ratio: float = None,
                         turnover_rate: float = None) -> dict:
-    """基于量化指标计算四维预评分 (0-100)
-
-    返回: {"技术面分": int, "资金面分": int, "估值面分": int,
-           "动量分": int, "量化总分": int, "量化信号": str}
-    """
     tech_score = 50
     capital_score = 50
     valuation_score = 50
@@ -170,11 +153,11 @@ def compute_quant_score(technicals: dict, pe: float = None,
     rsi = technicals.get("RSI14")
     if rsi is not None:
         if 50 <= rsi <= 70:
-            tech_score += 5  # 强势区间
+            tech_score += 5
         elif rsi > 80:
-            tech_score -= 5  # 超买风险
+            tech_score -= 5
         elif rsi < 30:
-            tech_score -= 3  # 弱势
+            tech_score -= 3
 
     macd_sig = technicals.get("MACD信号", "")
     if macd_sig == "金叉":
@@ -189,11 +172,11 @@ def compute_quant_score(technicals: dict, pe: float = None,
     boll_pos = technicals.get("布林位置")
     if boll_pos is not None:
         if 60 <= boll_pos <= 85:
-            tech_score += 5  # 强势区
+            tech_score += 5
         elif boll_pos > 95:
-            tech_score -= 5  # 过度偏离上轨
+            tech_score -= 5
         elif boll_pos < 10:
-            tech_score -= 3  # 跌破下轨
+            tech_score -= 3
 
     vol_state = technicals.get("量能状态", "")
     if vol_state == "显著放量":
@@ -236,9 +219,9 @@ def compute_quant_score(technicals: dict, pe: float = None,
 
     if turnover_rate is not None:
         if 3 <= turnover_rate <= 15:
-            capital_score += 5  # 活跃但不过热
+            capital_score += 5
         elif turnover_rate > 25:
-            capital_score -= 5  # 换手过高有出货风险
+            capital_score -= 5
 
     # ── 估值面分 ──
     if pe is not None and pe > 0:
@@ -268,12 +251,11 @@ def compute_quant_score(technicals: dict, pe: float = None,
     chg_10 = technicals.get("近10日涨幅")
     chg_20 = technicals.get("近20日涨幅")
 
-    # 短线动量（3-5日）
     if chg_3 is not None:
         if 2 <= chg_3 <= 15:
-            momentum_score += 8  # 适度上涨
+            momentum_score += 8
         elif chg_3 > 20:
-            momentum_score -= 5  # 涨幅过大
+            momentum_score -= 5
 
     if chg_5 is not None:
         if 3 <= chg_5 <= 20:
@@ -281,24 +263,21 @@ def compute_quant_score(technicals: dict, pe: float = None,
         elif chg_5 < -10:
             momentum_score -= 8
 
-    # 中线趋势（10-20日）
     if chg_20 is not None:
         if 5 <= chg_20 <= 30:
-            momentum_score += 8  # 中线趋势向上
+            momentum_score += 8
         elif chg_20 > 40:
-            momentum_score -= 5  # 涨幅过大短期有回调风险
+            momentum_score -= 5
         elif chg_20 < -15:
-            momentum_score -= 10  # 中线下跌趋势
+            momentum_score -= 10
 
-    # 量价配合：放量上涨 > 缩量上涨
     vol_ratio = technicals.get("量能比")
     if vol_ratio and chg_5 is not None:
         if vol_ratio > 1.2 and chg_5 > 0:
-            momentum_score += 8  # 放量上涨
+            momentum_score += 8
         elif vol_ratio < 0.8 and chg_5 > 5:
-            momentum_score -= 3  # 缩量上涨，动能不足
+            momentum_score -= 3
 
-    # 夹值
     tech_score = max(0, min(100, tech_score))
     capital_score = max(0, min(100, capital_score))
     valuation_score = max(0, min(100, valuation_score))
@@ -328,13 +307,10 @@ def compute_quant_score(technicals: dict, pe: float = None,
 
 
 def format_technicals_text(technicals: dict) -> str:
-    """将技术指标格式化为文本摘要，供 AI 参考"""
     if not technicals:
         return ""
 
     lines = []
-
-    # 均线
     ma_state = technicals.get("均线状态", "")
     ma_parts = []
     for k in ["MA5", "MA10", "MA20", "MA60"]:
@@ -343,25 +319,20 @@ def format_technicals_text(technicals: dict) -> str:
     if ma_parts:
         lines.append(f"均线: {', '.join(ma_parts)} → {ma_state}")
 
-    # RSI
     if "RSI14" in technicals:
         lines.append(f"RSI(14): {technicals['RSI14']} ({technicals.get('RSI信号', '')})")
 
-    # MACD
     if "MACD_DIF" in technicals:
         lines.append(f"MACD: DIF={technicals['MACD_DIF']}, DEA={technicals['MACD_DEA']}, "
                       f"柱={technicals['MACD柱']} → {technicals.get('MACD信号', '')}")
 
-    # 布林带
     if "布林上轨" in technicals:
         lines.append(f"布林带: 上={technicals['布林上轨']}, 中={technicals['布林中轨']}, "
                       f"下={technicals['布林下轨']}, 位置={technicals.get('布林位置', '')}%")
 
-    # 量能
     if "量能比" in technicals:
         lines.append(f"量能: 5日/20日均量比={technicals['量能比']} → {technicals.get('量能状态', '')}")
 
-    # 价格位置
     if "20日最高" in technicals:
         pos_info = f"20日区间: {technicals['20日最低']}~{technicals['20日最高']}"
         if "距20日高点" in technicals:
@@ -372,7 +343,6 @@ def format_technicals_text(technicals: dict) -> str:
     if "60日最高" in technicals:
         lines.append(f"60日区间: {technicals['60日最低']}~{technicals['60日最高']}")
 
-    # 涨跌幅
     chg_parts = []
     for d in [3, 5, 10, 20]:
         k = f"近{d}日涨幅"

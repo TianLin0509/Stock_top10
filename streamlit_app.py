@@ -1,7 +1,8 @@
-"""Stock Top 10 — 每日人气+成交额 Top 100 → AI 精选 Top 10"""
+"""🏆 每日 Top10 精选 — AI驱动 · 每日自动分析"""
 
-import time
 import streamlit as st
+import time as _time
+from datetime import date
 
 st.set_page_config(
     page_title="每日 Top10 精选",
@@ -9,278 +10,207 @@ st.set_page_config(
     layout="wide",
 )
 
-from config import MODEL_CONFIGS, MODEL_NAMES
-from ai.client import get_token_usage, reset_token_usage
-from data.hot_rank import get_hot_rank, get_volume_rank, merge_candidates
-from data.stock_filter import apply_filters, get_filter_summary
-from analysis.runner import (
-    get_cached_result, get_cached_summary, get_all_cached_models,
-    is_running, is_done, get_job, start_scoring,
+# ── 启动定时调度器 ──
+from utils.scheduler import start_top10_scheduler
+start_top10_scheduler()
+
+# ── 导入模块 ──
+from config import MODEL_CONFIGS, MODEL_NAMES, DEFAULT_MODEL, ADMIN_USERNAME
+from core.ai_client import get_token_usage
+from top10.runner import (
+    get_cached_result, get_cached_summary, get_cached_meta,
+    get_all_cached_models, start_scoring, is_running, get_job,
 )
-from ui.styles import inject_css
-from ui.cards import (
-    show_top10_cards, show_score_table, show_candidate_table,
-    show_consensus, show_progress,
+from top10.deep_runner import (
+    start_deep_top10_async, get_deep_status, is_deep_running,
 )
+from top10.cards import show_top10_cards, show_progress
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CSS + Header
-# ══════════════════════════════════════════════════════════════════════════════
-
-inject_css()
-
-# Token 计数显示
-usage = get_token_usage()
-if usage["total"] > 0:
-    total = usage["total"]
-    display = f"{total / 10000:.1f}万" if total >= 10000 else f"{total:,}"
-    st.markdown(f"""<div style="
-        position:fixed; top:10px; right:18px; z-index:9999;
-        background:rgba(99,102,241,0.9); color:#fff;
-        border-radius:50px; padding:4px 14px;
-        font-size:0.75rem; font-weight:700;
-        box-shadow:0 2px 8px rgba(0,0,0,0.15);
-    ">🔢 Token: {display}</div>""", unsafe_allow_html=True)
-
-st.markdown("""<div class="app-header">
-  <h1>🏆 每日 Top 10 精选</h1>
-  <p>人气榜 + 成交额榜 → Tushare 数据增强 → AI 深度分析 → 精选 Top 10</p>
-  <p style="font-weight:700; color:#fff;">立花道雪</p>
-</div>""", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Sidebar
+# 侧边栏
 # ══════════════════════════════════════════════════════════════════════════════
 
 with st.sidebar:
-    st.markdown("### ⚙️ 设置")
-    model_name = st.selectbox("AI 模型", MODEL_NAMES, index=3,
-                              help="选择用于深度分析的 AI 模型")
-    cfg = MODEL_CONFIGS.get(model_name, {})
-    st.caption(f"📌 {cfg.get('note', '')}")
+    st.markdown("## 🏆 每日 Top10 精选")
+    st.caption("AI驱动 · 每日自动分析")
+    st.divider()
 
-    top_n = st.slider("候选池大小", 30, 100, 50, step=10,
-                       help="从人气榜和成交额榜各取 Top N")
-    max_analyze = st.slider("最大分析数量", 10, 50, 30, step=5,
-                             help="初筛后最多分析多少只股票（控制 Token 消耗）")
-
-    st.markdown("---")
-    st.markdown("### 📊 数据来源")
-    st.caption("🔥 东方财富人气榜")
-    st.caption("💰 东方财富成交额榜")
-    try:
-        from data.tushare_data import get_ts_status
-        st.caption(f"📈 {get_ts_status()}")
-    except Exception:
-        st.caption("📈 Tushare 未加载")
-
-    st.markdown("---")
-    # 邮件推送
-    st.markdown("### 📧 邮件推送")
-    try:
-        from utils.email_sender import smtp_configured
-        if smtp_configured():
-            email_addr = st.text_input("收件邮箱", value="", placeholder="your@email.com",
-                                       key="email_input")
-            st.caption("分析完成后可一键推送报告到邮箱")
-        else:
-            st.caption("⚠️ SMTP 未配置")
-            st.caption("请在 Secrets 中添加：")
-            st.code("SMTP_HOST\nSMTP_PORT\nSMTP_USER\nSMTP_PASS", language=None)
-            email_addr = ""
-    except Exception:
-        st.caption("📧 邮件模块未加载")
-        email_addr = ""
-
-    st.markdown("---")
-    if st.button("🔄 重置 Token 计数"):
-        reset_token_usage()
-        st.rerun()
-
-    st.markdown("""<div class="disclaimer">
-    ⚠️ 本工具仅供学习研究，不构成投资建议。股市有风险，投资需谨慎。
-    </div>""", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 主流程
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Step 1: 获取数据（带进度条）
-st.markdown("### 📡 数据获取")
-
-_prog = st.progress(0, text="🐾 准备获取市场数据...")
-
-_prog.progress(0.05, text="🔥 正在获取人气榜数据...")
-hot_df, hot_err = get_hot_rank(top_n)
-
-_prog.progress(0.25, text="💰 正在获取成交额榜数据（优先 Tushare）...")
-vol_df, vol_err = get_volume_rank(top_n)
-
-_prog.progress(0.50, text="🔄 正在合并候选池并补充全市场数据...")
-merged = merge_candidates(hot_df, vol_df)
-
-_prog.progress(0.75, text="🔍 正在进行量化初筛...")
-before_count = len(merged)
-filtered = apply_filters(merged)
-after_count = len(filtered)
-
-_prog.progress(0.90, text="📊 正在获取板块轮动信号...")
-sectors = {}
-try:
-    from data.tushare_data import get_sector_rotation
-    sectors = get_sector_rotation()
-except Exception:
-    pass
-
-_prog.progress(1.0, text="🎉 数据加载完成！")
-time.sleep(0.3)
-_prog.empty()
-
-# 数据获取结果摘要
-col1, col2 = st.columns(2)
-with col1:
-    if hot_err:
-        st.warning(f"人气榜：{hot_err}")
-    else:
-        st.success(f"🔥 人气榜 Top {len(hot_df)}")
-with col2:
-    if vol_err:
-        st.warning(f"成交额榜：{vol_err}")
-    else:
-        st.success(f"💰 成交额榜 Top {len(vol_df)}")
-
-# 板块轮动信号
-if sectors.get("概念板块") or sectors.get("行业板块"):
-    with st.expander("📊 今日板块轮动", expanded=False):
-        sc1, sc2 = st.columns(2)
-        with sc1:
-            st.markdown("**🔥 概念板块 Top5**")
-            for s in sectors.get("概念板块", []):
-                st.caption(s)
-        with sc2:
-            st.markdown("**🏭 行业板块 Top5**")
-            for s in sectors.get("行业板块", []):
-                st.caption(s)
-
-if before_count > 0:
-    st.caption(get_filter_summary(before_count, after_count))
-
-# 限制分析数量
-candidates = filtered.head(max_analyze)
-
-# Step 2: 展示候选池（带来源着色）
-with st.expander(f"📋 候选池（{len(candidates)} 只）", expanded=False):
-    show_candidate_table(candidates)
-
-st.markdown("---")
-
-# Step 4: AI 分析
-st.markdown("### 🤖 AI 深度分析")
-
-
-def _show_results(result_df, summary_text=""):
-    """展示分析结果 + 导出 + 邮件"""
-    show_top10_cards(result_df)
-
-    # 导出 + 完整评分表
-    col_export, col_table = st.columns([1, 1])
-    with col_export:
-        # CSV 导出按钮
-        csv_cols = [c for c in ["代码", "股票名称", "行业", "最新价", "涨跌幅",
-                                 "基本面", "题材热度", "技术面", "综合评分",
-                                 "短线建议", "模型"]
-                    if c in result_df.columns]
-        csv_data = result_df[csv_cols].to_csv(index=True, encoding="utf-8-sig")
-        from datetime import date as _date
-        st.download_button(
-            "📥 导出 CSV",
-            csv_data,
-            file_name=f"top10_{_date.today().isoformat()}.csv",
-            mime="text/csv",
-        )
-    with col_table:
-        if email_addr:
-            if st.button("📧 发送报告到邮箱", key="send_email"):
-                with st.spinner("正在发送..."):
-                    from utils.email_sender import send_report_email
-                    ok, msg = send_report_email(email_addr, result_df,
-                                                summary_text, model_name)
-                    if ok:
-                        st.success(f"✅ 已发送至 {email_addr}")
-                    else:
-                        st.error(msg)
-
-    with st.expander("📊 完整评分表", expanded=False):
-        show_score_table(result_df)
-
-    if summary_text:
-        st.markdown("---")
-        st.markdown("### 📝 每日总结报告")
-        st.markdown(summary_text)
-
-    # 多模型共识分析
+    # 模型选择
     cached_models = get_all_cached_models()
-    if len(cached_models) >= 2:
-        st.markdown("---")
-        st.markdown("### 🤝 多模型共识分析")
-        cached_results = {}
-        for m in cached_models:
-            # 找到对应的 display name
-            for display_name in MODEL_NAMES:
-                if m in display_name or display_name.split("·")[-1].strip() in m:
-                    r = get_cached_result(display_name)
-                    if r is not None and not r.empty:
-                        cached_results[display_name] = r
-                    break
-            else:
-                r = get_cached_result(m)
-                if r is not None and not r.empty:
-                    cached_results[m] = r
-        if len(cached_results) >= 2:
-            show_consensus(cached_results)
-        else:
-            st.info(f"今日已有 {len(cached_models)} 个模型的缓存，切换模型查看共识")
+    if cached_models:
+        st.success(f"✅ 今日已有 **{len(cached_models)}** 个模型结果")
+
+    selected_model = st.selectbox(
+        "选择查看模型",
+        MODEL_NAMES,
+        index=MODEL_NAMES.index(DEFAULT_MODEL) if DEFAULT_MODEL in MODEL_NAMES else 0,
+        help="选择要查看的模型结果",
+    )
+
+    # 管理员区域
+    st.divider()
+    st.markdown("#### 🔐 管理员操作")
+
+    admin_pass = st.text_input("管理员密码", type="password", key="admin_pass")
+    is_admin = admin_pass == st.secrets.get("ADMIN_PASS", "")
+
+    if is_admin:
+        st.success("✅ 管理员已验证")
+
+        trigger_model = st.selectbox(
+            "分析模型",
+            MODEL_NAMES,
+            index=MODEL_NAMES.index(DEFAULT_MODEL) if DEFAULT_MODEL in MODEL_NAMES else 0,
+            key="trigger_model",
+        )
+        candidate_count = st.slider("候选池数量", 30, 200, 100, 10, key="candidate_count")
+
+        # 深度分析状态
+        deep_status_sidebar = get_deep_status()
+        if deep_status_sidebar and deep_status_sidebar.get("status") == "running":
+            st.warning(f"⏳ 深度分析进行中... ({deep_status_sidebar.get('phase', '')})")
+        elif is_deep_running():
+            st.warning("⏳ 深度分析进行中...")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🚀 快速分析", use_container_width=True,
+                         help="仅AI三维评分，不含深度分析"):
+                from top10.hot_rank import get_hot_rank, get_volume_rank, merge_candidates
+                from top10.stock_filter import apply_filters
+
+                with st.spinner("获取候选池..."):
+                    hot_df, _ = get_hot_rank(candidate_count)
+                    vol_df, _ = get_volume_rank(candidate_count)
+                    merged = merge_candidates(hot_df, vol_df)
+                    filtered = apply_filters(merged)
+                    candidates = filtered.head(candidate_count)
+
+                if candidates.empty:
+                    st.error("候选池为空，请稍后重试")
+                else:
+                    st.info(f"候选池: {len(candidates)} 只，开始评分...")
+                    start_scoring(st.session_state, candidates, trigger_model,
+                                  username=ADMIN_USERNAME)
+
+        with col2:
+            if st.button("🔬 深度分析", use_container_width=True,
+                         help="完整6阶段深度分析流水线",
+                         disabled=is_deep_running()):
+                started = start_deep_top10_async(
+                    model_name=trigger_model,
+                    candidate_count=candidate_count,
+                    username=ADMIN_USERNAME,
+                )
+                if started:
+                    st.success("🚀 深度分析已启动！")
+                else:
+                    st.warning("已有分析在运行中")
+
+    elif admin_pass:
+        st.error("❌ 密码错误")
+
+    # Token 统计
+    st.divider()
+    tokens = get_token_usage()
+    total = tokens["total"]
+    if total >= 10000:
+        st.caption(f"Token: {total / 10000:.1f}万")
+    elif total > 0:
+        st.caption(f"Token: {total:,}")
+
+    st.markdown(
+        '<div style="text-align:center;color:#9ca3af;font-size:0.75rem;margin-top:20px;">'
+        'by 立花道雪</div>',
+        unsafe_allow_html=True,
+    )
 
 
-# 检查缓存
-cached = get_cached_result(model_name)
-cached_summary = get_cached_summary(model_name) or ""
+# ══════════════════════════════════════════════════════════════════════════════
+# 主区域
+# ══════════════════════════════════════════════════════════════════════════════
 
-if cached is not None and not cached.empty:
-    st.success(f"📦 已有今日 {model_name} 的分析缓存（{len(cached)} 只），直接展示结果")
-    _show_results(cached, cached_summary)
-    if st.button("🔄 重新分析（忽略缓存）", key="re_analyze"):
-        from datetime import date as _date
-        st.session_state.pop(f"top10_result_{_date.today().isoformat()}_{model_name}", None)
-        st.session_state.pop(f"top10_summary_{_date.today().isoformat()}_{model_name}", None)
-        st.session_state.pop("bg_job", None)
-        st.rerun()
-
-elif is_running(st.session_state):
-    show_progress(get_job(st.session_state))
-    time.sleep(2)
+# 显示后台任务进度
+job = get_job(st.session_state)
+if is_running(st.session_state):
+    show_progress(job)
+    _time.sleep(3)
     st.rerun()
-
-elif is_done(st.session_state):
-    job = get_job(st.session_state)
+elif job.get("status") == "done":
     if job.get("error"):
         st.error(f"分析失败：{job['error']}")
-        if st.button("🔄 重试"):
-            st.session_state.pop("bg_job", None)
-            st.rerun()
     elif job.get("result") is not None:
-        _show_results(job["result"], job.get("summary", ""))
+        show_progress(job)
+
+# 显示深度分析进度
+deep_status = get_deep_status()
+if deep_status and deep_status.get("status") == "running":
+    phase = deep_status.get("phase", "")
+    progress = deep_status.get("progress", [])
+    st.info(f"🔬 深度分析进行中: {phase}")
+    if progress:
+        with st.expander("查看进度详情", expanded=False):
+            for msg in progress[-10:]:
+                st.write(msg)
+    _time.sleep(5)
+    st.rerun()
+
+# 尝试读取缓存结果
+cached_df = get_cached_result(selected_model)
+
+if cached_df is not None and not cached_df.empty:
+    # 显示元信息
+    meta = get_cached_meta(selected_model)
+    if meta:
+        tokens_used = meta.get("tokens", 0)
+        triggered_by = meta.get("user", "")
+        if tokens_used >= 10000:
+            tokens_str = f"{tokens_used / 10000:.1f}万"
+        else:
+            tokens_str = f"{tokens_used:,}"
+        st.caption(
+            f"📊 {date.today().strftime('%Y-%m-%d')} | 模型: {selected_model} | "
+            f"触发: {triggered_by} | Token: {tokens_str}"
+        )
+
+    # 显示总结
+    summary = get_cached_summary(selected_model)
+    if summary:
+        with st.expander("📝 每日总结", expanded=False):
+            st.markdown(summary)
+
+    # 三Tab 卡片展示
+    show_top10_cards(cached_df)
+
+    # 深度分析展示（如果用户点击了某只股票）
+    pick_code = st.session_state.get("_top10_pick")
+    if pick_code:
+        st.divider()
+        pick_row = cached_df[cached_df["代码"] == pick_code]
+        if not pick_row.empty:
+            pick_name = pick_row.iloc[0]["股票名称"]
+            st.subheader(f"🔍 {pick_name}（{pick_code}）深度分析")
+
+            ai_text = pick_row.iloc[0].get("AI分析", "")
+            if ai_text:
+                st.markdown(ai_text)
+
+        if st.button("← 返回 Top10 列表"):
+            del st.session_state["_top10_pick"]
+            st.rerun()
 
 else:
-    if candidates.empty:
-        st.warning("候选池为空，请检查数据源")
-    else:
-        st.info(f"将使用 **{model_name}** 对 {len(candidates)} 只候选股进行深度分析"
-                f"（3路并发，预计耗时约 {len(candidates) * 8 // 3} 秒）")
-        if st.button("🚀 开始 AI 分析", type="primary", key="start_analysis"):
-            start_scoring(st.session_state, candidates, model_name)
-            time.sleep(0.5)
-            st.rerun()
+    # 无结果 — 显示欢迎页
+    st.markdown(
+        '<div style="text-align:center;padding:60px 20px;">'
+        '<h2 style="color:#6366f1;">🏆 每日 Top10 精选</h2>'
+        '<p style="color:#6b7280;font-size:1.1rem;">'
+        'AI驱动的A股每日热门股票精选<br>'
+        '每晚 22:00 自动分析 · 管理员可手动触发'
+        '</p>'
+        '<p style="color:#9ca3af;margin-top:20px;">'
+        '今日暂无分析结果，请等待自动分析或由管理员手动触发'
+        '</p></div>',
+        unsafe_allow_html=True,
+    )

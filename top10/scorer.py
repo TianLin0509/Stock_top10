@@ -4,12 +4,11 @@ import re
 import math
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from ai.client import call_ai
-from ai.prompts_top10 import SYSTEM_SCORER, build_score_prompt
+from core.ai_client import call_ai
+from top10.prompts import SYSTEM_SCORER, build_score_prompt
 
 
 def _parse_score(text: str) -> float:
-    """从 AI 回复中提取综合评分"""
     m = re.search(r"综合评分[：:]\s*[*]*(\d+\.?\d*)\s*/\s*10", text)
     if m:
         return float(m.group(1))
@@ -23,7 +22,6 @@ def _parse_score(text: str) -> float:
 
 
 def _parse_sub_scores(text: str) -> dict:
-    """从 AI 回复中提取三项子评分"""
     scores = {}
     for label in ["基本面", "题材热度", "技术面"]:
         m = re.search(rf"{label}\s*\|\s*(\d+\.?\d*)\s*/\s*10", text)
@@ -33,8 +31,14 @@ def _parse_sub_scores(text: str) -> dict:
 
 
 def _parse_advice(text: str) -> str:
-    """从 AI 回复中提取短线建议"""
     m = re.search(r"短线建议[：:]\s*[*]*\s*(强烈推荐|推荐|观望|回避)", text)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _parse_mid_advice(text: str) -> str:
+    m = re.search(r"中期建议[：:]\s*[*]*\s*(强烈推荐|推荐|观望|回避)", text)
     if m:
         return m.group(1)
     return ""
@@ -61,7 +65,6 @@ def _safe_int(v):
 
 def score_single_stock(client, cfg, row: pd.Series,
                        model_name: str = "") -> dict:
-    """对单只股票进行 AI 评分，返回结果字典"""
     code = str(row.get("代码", ""))
     name = str(row.get("股票名称", ""))
     price = _safe_float(row.get("最新价", 0)) or 0.0
@@ -77,12 +80,9 @@ def score_single_stock(client, cfg, row: pd.Series,
     mkt_cap_yi = _safe_float(row.get("总市值(亿)") if "总市值(亿)" in row.index else None)
     industry = row.get("行业", "") if "行业" in row.index else None
     kline_summary = row.get("K线摘要", "") if "K线摘要" in row.index else None
-
-    # 新增：行业基准
     industry_pe = _safe_float(row.get("行业PE均值") if "行业PE均值" in row.index else None)
     industry_pb = _safe_float(row.get("行业PB均值") if "行业PB均值" in row.index else None)
 
-    # 新增：量化预评分
     quant_score = None
     if "量化总分" in row.index and row.get("量化总分") is not None:
         quant_score = {
@@ -102,11 +102,12 @@ def score_single_stock(client, cfg, row: pd.Series,
         industry_pe, industry_pb, quant_score
     )
     text, err = call_ai(client, cfg, prompt,
-                        system=SYSTEM_SCORER, max_tokens=4000)
+                        system=SYSTEM_SCORER, max_tokens=2000)
 
     score = _parse_score(text) if not err else 0.0
     sub_scores = _parse_sub_scores(text) if not err else {}
     advice = _parse_advice(text) if not err else ""
+    mid_advice = _parse_mid_advice(text) if not err else ""
 
     return {
         "代码": code,
@@ -119,6 +120,7 @@ def score_single_stock(client, cfg, row: pd.Series,
         "题材热度": sub_scores.get("题材热度"),
         "技术面": sub_scores.get("技术面"),
         "短线建议": advice,
+        "中期建议": mid_advice,
         "AI分析": text if not err else f"分析失败：{err}",
         "模型": model_name,
         "人气排名": hot_rank,
@@ -132,7 +134,6 @@ def score_all(client, cfg, df: pd.DataFrame,
               model_name: str = "",
               progress_callback=None,
               max_workers: int = 3) -> pd.DataFrame:
-    """对整个候选池并行评分，返回按评分排序的 DataFrame"""
     results = []
     total = len(df)
     completed_count = 0
@@ -173,7 +174,6 @@ def score_all(client, cfg, df: pd.DataFrame,
 
 
 def get_top_n(scored_df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
-    """取评分最高的 N 只"""
     if scored_df.empty:
         return scored_df
     return scored_df.head(n)
