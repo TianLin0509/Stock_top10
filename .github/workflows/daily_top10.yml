@@ -51,7 +51,7 @@ jobs:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           # GitHub persistence
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+          GITHUB_REPO: TianLin0509/Stock_test
           GITHUB_CACHE_BRANCH: data-archive
           # Email
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
