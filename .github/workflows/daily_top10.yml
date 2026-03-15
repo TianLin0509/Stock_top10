@@ -4,7 +4,20 @@ on:
   schedule:
     # 北京时间 22:00 = UTC 14:00，仅工作日 (周一至周五)
     - cron: '0 14 * * 1-5'
-  workflow_dispatch:  # 支持手动触发
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'AI 模型（留空用默认豆包 Mini）'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - '🟤 豆包 · Seed 2.0 Mini'
+          - '🟣 豆包 · Seed 2.0 Pro'
+          - '🔵 智谱 · GLM-5'
+          - '🟠 Qwen · 通义千问'
+          - '⚫ DeepSeek'
 
 jobs:
   analyze:
@@ -45,4 +58,5 @@ jobs:
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TOP10_MODEL: ${{ github.event.inputs.model }}
         run: python run_daily.py
