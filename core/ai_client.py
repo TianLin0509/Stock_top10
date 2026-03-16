@@ -83,7 +83,7 @@ def _doubao_extract_text(data: dict) -> str:
 
 
 def doubao_call(cfg, messages, max_tokens) -> tuple[str, str | None]:
-    """豆包非流式 responses API 调用"""
+    """豆包非流式 responses API 调用（联网搜索失败自动回退普通模式）"""
     url, headers, body = _doubao_build_request(cfg, messages, max_tokens, stream=False)
     try:
         resp = requests.post(url, headers=headers, json=body, timeout=180)
@@ -97,11 +97,21 @@ def doubao_call(cfg, messages, max_tokens) -> tuple[str, str | None]:
             logger.warning("[doubao] API 返回错误: %s", err_msg)
             return "", f"豆包 API 错误：{err_msg}"
         text = _doubao_extract_text(data)
-        if not text:
-            logger.warning("[doubao] 返回内容为空, status=%s, keys=%s",
-                           data.get("status"), list(data.keys())[:10])
-            return "", "豆包返回内容为空，可能联网搜索超时或并发限流"
-        return text, None
+        if text:
+            return text, None
+
+        # 联网搜索返回空（status=incomplete），回退到无联网模式
+        status = data.get("status", "")
+        logger.warning("[doubao] 联网搜索返回空(status=%s)，回退普通模式", status)
+        body.pop("tools", None)
+        resp2 = requests.post(url, headers=headers, json=body, timeout=180)
+        resp2.encoding = "utf-8"
+        if resp2.status_code == 200:
+            data2 = resp2.json()
+            text2 = _doubao_extract_text(data2)
+            if text2:
+                return text2, None
+        return "", "豆包联网+普通模式均返回空"
     except requests.exceptions.Timeout:
         return "", "豆包 API 请求超时，请稍后重试"
     except Exception as e:
