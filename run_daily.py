@@ -29,7 +29,7 @@ def main():
         logger.info("深度分析正在运行中，跳过")
         return
 
-    model = os.environ.get("TOP10_MODEL", DEFAULT_MODEL)
+    model = os.environ.get("TOP10_MODEL", "").strip() or DEFAULT_MODEL
     count = int(os.environ.get("TOP10_CANDIDATES", "100"))
 
     logger.info("开始每日深度分析 — 模型: %s, 候选数: %d", model, count)
