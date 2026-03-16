@@ -64,7 +64,8 @@ def _safe_int(v):
 
 
 def score_single_stock(client, cfg, row: pd.Series,
-                       model_name: str = "") -> dict:
+                       model_name: str = "",
+                       username: str = "") -> dict:
     code = str(row.get("代码", ""))
     name = str(row.get("股票名称", ""))
     price = _safe_float(row.get("最新价", 0)) or 0.0
@@ -101,8 +102,10 @@ def score_single_stock(client, cfg, row: pd.Series,
         pe, pb, mkt_cap_yi, industry, kline_summary,
         industry_pe, industry_pb, quant_score
     )
-    text, err = call_ai(client, cfg, prompt,
-                        system=SYSTEM_SCORER, max_tokens=2000)
+    from top10.deep_runner import _call_with_fallback
+    text, err = _call_with_fallback(client, cfg, model_name, prompt,
+                                    SYSTEM_SCORER, 2000, username,
+                                    f"{name}/评分")
 
     score = _parse_score(text) if not err else 0.0
     sub_scores = _parse_sub_scores(text) if not err else {}
@@ -133,14 +136,15 @@ def score_single_stock(client, cfg, row: pd.Series,
 def score_all(client, cfg, df: pd.DataFrame,
               model_name: str = "",
               progress_callback=None,
-              max_workers: int = 3) -> pd.DataFrame:
+              max_workers: int = 3,
+              username: str = "") -> pd.DataFrame:
     results = []
     total = len(df)
     completed_count = 0
 
     def _score_row(idx_row):
         _, row = idx_row
-        return score_single_stock(client, cfg, row, model_name)
+        return score_single_stock(client, cfg, row, model_name, username)
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {

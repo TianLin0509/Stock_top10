@@ -48,10 +48,65 @@ def is_deep_running() -> bool:
         return _is_running
 
 
+_FALLBACK_MODELS = [
+    "🟠 Qwen · 通义千问",
+    "🔵 智谱 · GLM-5",
+    "🟤 豆包 · Seed 2.0 Mini",
+    "🟣 豆包 · Seed 2.0 Pro",
+    "🟢 Gemini 2.5 Pro · Google",
+]
+
+_RETRY_WAIT = [10, 20, 30]  # 切换模型前的等待秒数
+
+
+def _call_with_fallback(primary_client, primary_cfg, primary_model: str,
+                        prompt: str, system: str, max_tokens: int,
+                        username: str, label: str) -> tuple[str, str | None]:
+    """
+    带模型切换的可靠调用：
+    1. 用主模型调用（call_ai 内部已有 3 次重试）
+    2. 失败则等待后切换备用模型，最多尝试 3 个备用模型
+    3. 全失败返回 ("", err)
+    """
+    from core.ai_client import call_ai, get_ai_client
+
+    # 先用主模型
+    text, err = call_ai(primary_client, primary_cfg, prompt,
+                        system=system, max_tokens=max_tokens, username=username)
+    if not err and text:
+        return text, None
+
+    logger.warning("[fallback] %s 主模型 %s 失败: %s", label, primary_model, err)
+
+    # 构建备用模型列表（排除主模型，最多3个）
+    fallbacks = [m for m in _FALLBACK_MODELS if m != primary_model][:3]
+
+    for i, fb_model in enumerate(fallbacks):
+        wait = _RETRY_WAIT[i] if i < len(_RETRY_WAIT) else 30
+        logger.info("[fallback] %s 等待 %ds 后切换到 %s", label, wait, fb_model)
+        _time.sleep(wait)
+
+        fb_client, fb_cfg, fb_err = get_ai_client(fb_model)
+        if fb_err:
+            logger.warning("[fallback] %s 备用模型 %s 初始化失败: %s", label, fb_model, fb_err)
+            continue
+
+        text, err = call_ai(fb_client, fb_cfg, prompt,
+                            system=system, max_tokens=max_tokens, username=username)
+        if not err and text:
+            logger.info("[fallback] %s 使用备用模型 %s 成功", label, fb_model)
+            return text, None
+        logger.warning("[fallback] %s 备用模型 %s 也失败: %s", label, fb_model, err)
+
+    return "", f"主模型+{len(fallbacks)}个备用模型均失败"
+
+
 def _deep_analyze_one(client, cfg, model_name: str,
                       code6: str, name: str, username: str = "") -> dict | None:
-    """对单只股票做完整深度分析（6维，不含 MoE）"""
-    from core.ai_client import call_ai, get_token_usage
+    """对单只股票做完整深度分析（6维，不含 MoE）。
+    每个维度失败时自动切换备用模型重试，全失败该维度为空。"""
+    from core.ai_client import get_token_usage
+
     _t_before = get_token_usage()["total"]
 
     from deep.prompts import (
@@ -59,9 +114,8 @@ def _deep_analyze_one(client, cfg, model_name: str,
         build_fundamentals_prompt, build_sentiment_prompt,
         build_sector_prompt, build_holders_prompt,
     )
-    from deep.context import build_analysis_context
     from core.tushare_client import (
-        price_summary, to_ts_code, to_code6,
+        price_summary, to_ts_code,
         get_capital_flow, get_dragon_tiger,
         get_northbound_flow, get_margin_trading,
         get_sector_peers, get_holders_info, get_pledge_info, get_fund_holdings,
@@ -75,10 +129,12 @@ def _deep_analyze_one(client, cfg, model_name: str,
         fin, _ = get_financial(ts_code)
 
         analyses = {}
+        label_prefix = f"{name}({code6})"
 
         # 1. 预期差
         p, s = build_expectation_prompt(name, ts_code, info)
-        text, err = call_ai(client, cfg, p, system=s, max_tokens=8000, username=username)
+        text, err = _call_with_fallback(client, cfg, model_name, p, s, 8000,
+                                        username, f"{label_prefix}/预期差")
         if not err:
             analyses["expectation"] = text
 
@@ -89,26 +145,30 @@ def _deep_analyze_one(client, cfg, model_name: str,
         nb, _ = get_northbound_flow(ts_code)
         margin, _ = get_margin_trading(ts_code)
         p, s = build_trend_prompt(name, ts_code, psmry, cap, dragon, nb, margin)
-        text, err = call_ai(client, cfg, p, system=s, max_tokens=8000, username=username)
+        text, err = _call_with_fallback(client, cfg, model_name, p, s, 8000,
+                                        username, f"{label_prefix}/趋势")
         if not err:
             analyses["trend"] = text
 
         # 3. 基本面
         p, s = build_fundamentals_prompt(name, ts_code, info, fin)
-        text, err = call_ai(client, cfg, p, system=s, max_tokens=8000, username=username)
+        text, err = _call_with_fallback(client, cfg, model_name, p, s, 8000,
+                                        username, f"{label_prefix}/基本面")
         if not err:
             analyses["fundamentals"] = text
 
         # 4. 舆情
         p, s = build_sentiment_prompt(name, ts_code, info)
-        text, err = call_ai(client, cfg, p, system=s, max_tokens=8000, username=username)
+        text, err = _call_with_fallback(client, cfg, model_name, p, s, 8000,
+                                        username, f"{label_prefix}/舆情")
         if not err:
             analyses["sentiment"] = text
 
         # 5. 板块联动
         sector_data, _ = get_sector_peers(ts_code)
         p, s = build_sector_prompt(name, ts_code, info, sector_data)
-        text, err = call_ai(client, cfg, p, system=s, max_tokens=8000, username=username)
+        text, err = _call_with_fallback(client, cfg, model_name, p, s, 8000,
+                                        username, f"{label_prefix}/板块")
         if not err:
             analyses["sector"] = text
 
@@ -117,7 +177,8 @@ def _deep_analyze_one(client, cfg, model_name: str,
         pledge, _ = get_pledge_info(ts_code)
         fund, _ = get_fund_holdings(ts_code)
         p, s = build_holders_prompt(name, ts_code, info, holders, pledge, fund)
-        text, err = call_ai(client, cfg, p, system=s, max_tokens=8000, username=username)
+        text, err = _call_with_fallback(client, cfg, model_name, p, s, 8000,
+                                        username, f"{label_prefix}/股东")
         if not err:
             analyses["holders"] = text
 
@@ -224,10 +285,8 @@ def _run_moe_standalone(client, cfg, model_name, name, code6, analyses, username
     return {"roles": role_results, "ceo": ceo_text, "done": True}
 
 
-def _generate_one_liner(client, cfg, name: str, code6: str,
+def _generate_one_liner(client, cfg, model_name: str, name: str, code6: str,
                         score: float, analyses: dict, username: str = "") -> str:
-    from core.ai_client import call_ai
-
     snippets = []
     for k in ["expectation", "trend", "fundamentals"]:
         text = analyses.get(k, "")
@@ -247,7 +306,8 @@ def _generate_one_liner(client, cfg, name: str, code6: str,
 - 明确给出短线建议方向
 - 不超过40字"""
 
-    text, err = call_ai(client, cfg, prompt, max_tokens=200, username=username)
+    text, err = _call_with_fallback(client, cfg, model_name, prompt, "", 200,
+                                    username, f"{name}/一句话理由")
     if err:
         return ""
     return text.strip().strip('"').strip("'")
@@ -337,7 +397,8 @@ def run_deep_top10(model_name: str = "🟤 豆包 · Seed 2.0 Mini",
         scored = score_all(client, cfg, enriched,
                            model_name=model_name,
                            progress_callback=score_progress,
-                           max_workers=2)
+                           max_workers=2,
+                           username=username)
 
         _log(f"  ✅ 评分完成，共 {len(scored)} 只")
 
@@ -393,7 +454,7 @@ def run_deep_top10(model_name: str = "🟤 豆包 · Seed 2.0 Mini",
             score = row["综合评分"]
             deep = deep_results.get(code6, {})
             analyses_data = deep.get("analyses", {})
-            liner = _generate_one_liner(client, cfg, name, code6, score, analyses_data, username)
+            liner = _generate_one_liner(client, cfg, model_name, name, code6, score, analyses_data, username)
             one_liners[code6] = liner
             if liner:
                 _log(f"  {name}: {liner}")
@@ -429,10 +490,10 @@ def run_deep_top10(model_name: str = "🟤 豆包 · Seed 2.0 Mini",
         except Exception:
             pass
 
-        from core.ai_client import call_ai
         summary_prompt = build_summary_prompt(stocks_text, len(candidates))
-        summary, s_err = call_ai(client, cfg, summary_prompt,
-                                  system=SYSTEM_SUMMARY, max_tokens=4000, username=username)
+        summary, s_err = _call_with_fallback(client, cfg, model_name,
+                                              summary_prompt, SYSTEM_SUMMARY, 4000,
+                                              username, "总结报告")
         if s_err:
             summary = f"总结生成失败：{s_err}"
 

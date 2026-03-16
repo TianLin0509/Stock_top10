@@ -164,7 +164,7 @@ def call_ai(client: OpenAI, cfg: dict, prompt: str,
     """
     messages = _build_messages(prompt, system)
 
-    # 豆包专属路径（带重试，间隔更长以应对联网搜索限流）
+    # 豆包专属路径（带重试，间隔更长以应对联网搜索限流，不回退普通模式）
     if cfg.get("provider") == "doubao" and cfg.get("supports_search"):
         _doubao_delays = [8, 15, 25]
         for attempt in range(_MAX_RETRIES):
@@ -175,9 +175,8 @@ def call_ai(client: OpenAI, cfg: dict, prompt: str,
                 return text, None
             logger.warning("[doubao] 第%d次尝试失败: %s", attempt + 1, err)
             if attempt < _MAX_RETRIES - 1:
-                import time as _time
                 _time.sleep(_doubao_delays[attempt])
-        return text, err
+        return "", err
 
     extra = _build_extra(cfg)
     last_err = None
