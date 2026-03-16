@@ -83,7 +83,7 @@ def _doubao_extract_text(data: dict) -> str:
 
 
 def doubao_call(cfg, messages, max_tokens) -> tuple[str, str | None]:
-    """豆包非流式 responses API 调用（联网搜索失败自动回退普通模式）"""
+    """豆包非流式 responses API 调用（含联网搜索）"""
     url, headers, body = _doubao_build_request(cfg, messages, max_tokens, stream=False)
     try:
         resp = requests.post(url, headers=headers, json=body, timeout=180)
@@ -97,21 +97,11 @@ def doubao_call(cfg, messages, max_tokens) -> tuple[str, str | None]:
             logger.warning("[doubao] API 返回错误: %s", err_msg)
             return "", f"豆包 API 错误：{err_msg}"
         text = _doubao_extract_text(data)
-        if text:
-            return text, None
-
-        # 联网搜索返回空（status=incomplete），回退到无联网模式
-        status = data.get("status", "")
-        logger.warning("[doubao] 联网搜索返回空(status=%s)，回退普通模式", status)
-        body.pop("tools", None)
-        resp2 = requests.post(url, headers=headers, json=body, timeout=180)
-        resp2.encoding = "utf-8"
-        if resp2.status_code == 200:
-            data2 = resp2.json()
-            text2 = _doubao_extract_text(data2)
-            if text2:
-                return text2, None
-        return "", "豆包联网+普通模式均返回空"
+        if not text:
+            status = data.get("status", "")
+            logger.warning("[doubao] 返回内容为空, status=%s", status)
+            return "", f"豆包返回空(status={status})，可能联网搜索并发限流"
+        return text, None
     except requests.exceptions.Timeout:
         return "", "豆包 API 请求超时，请稍后重试"
     except Exception as e:
@@ -174,8 +164,9 @@ def call_ai(client: OpenAI, cfg: dict, prompt: str,
     """
     messages = _build_messages(prompt, system)
 
-    # 豆包专属路径（带重试）
+    # 豆包专属路径（带重试，间隔更长以应对联网搜索限流）
     if cfg.get("provider") == "doubao" and cfg.get("supports_search"):
+        _doubao_delays = [8, 15, 25]
         for attempt in range(_MAX_RETRIES):
             text, err = doubao_call(cfg, messages, max_tokens)
             if not err:
@@ -185,7 +176,7 @@ def call_ai(client: OpenAI, cfg: dict, prompt: str,
             logger.warning("[doubao] 第%d次尝试失败: %s", attempt + 1, err)
             if attempt < _MAX_RETRIES - 1:
                 import time as _time
-                _time.sleep(_RETRY_DELAYS[attempt])
+                _time.sleep(_doubao_delays[attempt])
         return text, err
 
     extra = _build_extra(cfg)
