@@ -6,9 +6,17 @@ import os
 import threading
 from datetime import date
 import pandas as pd
-import streamlit as st
 from core.ai_client import get_ai_client, call_ai, get_token_usage
 from top10.prompts import SYSTEM_SUMMARY, build_summary_prompt
+
+
+def _get_ss():
+    """安全获取 Streamlit session_state，Actions 环境下返回空 dict"""
+    try:
+        import streamlit as st
+        return _get_ss()
+    except Exception:
+        return {}
 from top10.scorer import score_all
 
 logger = logging.getLogger(__name__)
@@ -87,11 +95,11 @@ def _load_from_data(data: dict, model_name: str) -> pd.DataFrame | None:
         df = pd.DataFrame(data["results"])
         df.index = df.index + 1
         df.index.name = "推荐排名"
-        st.session_state[_cache_key(model_name)] = df
+        _get_ss()[_cache_key(model_name)] = df
         if "summary" in data:
-            st.session_state[_summary_key(model_name)] = data["summary"]
+            _get_ss()[_summary_key(model_name)] = data["summary"]
         if "triggered_by" in data:
-            st.session_state[_meta_key(model_name)] = {
+            _get_ss()[_meta_key(model_name)] = {
                 "user": data["triggered_by"],
                 "tokens": data.get("tokens_used", 0),
             }
@@ -103,8 +111,8 @@ def _load_from_data(data: dict, model_name: str) -> pd.DataFrame | None:
 def get_cached_result(model_name: str) -> pd.DataFrame | None:
     """优先 session_state → 本地 JSON → GitHub 远程拉取"""
     key = _cache_key(model_name)
-    if key in st.session_state:
-        return st.session_state[key]
+    if key in _get_ss():
+        return _get_ss()[key]
 
     # 本地文件
     fp = _file_path(model_name)
@@ -138,29 +146,29 @@ def get_cached_result(model_name: str) -> pd.DataFrame | None:
 
 def get_cached_meta(model_name: str) -> dict | None:
     mkey = _meta_key(model_name)
-    if mkey in st.session_state:
-        return st.session_state[mkey]
+    if mkey in _get_ss():
+        return _get_ss()[mkey]
     get_cached_result(model_name)
-    return st.session_state.get(mkey)
+    return _get_ss().get(mkey)
 
 
 def get_cached_summary(model_name: str) -> str | None:
     skey = _summary_key(model_name)
-    if skey in st.session_state:
-        return st.session_state[skey]
+    if skey in _get_ss():
+        return _get_ss()[skey]
     get_cached_result(model_name)
-    return st.session_state.get(skey)
+    return _get_ss().get(skey)
 
 
 def save_cached_result(model_name: str, df: pd.DataFrame, summary: str = "",
                        triggered_by: str = "", tokens_used: int = 0):
     # 1. session_state
     try:
-        st.session_state[_cache_key(model_name)] = df
+        _get_ss()[_cache_key(model_name)] = df
         if summary:
-            st.session_state[_summary_key(model_name)] = summary
+            _get_ss()[_summary_key(model_name)] = summary
         if triggered_by:
-            st.session_state[_meta_key(model_name)] = {
+            _get_ss()[_meta_key(model_name)] = {
                 "user": triggered_by, "tokens": tokens_used,
             }
     except Exception:
@@ -202,8 +210,8 @@ def get_all_cached_models() -> list[str]:
     _ss_key = "_top10_all_models_cache"
     _ts_key = "_top10_all_models_ts"
     try:
-        cached = st.session_state.get(_ss_key)
-        cached_ts = st.session_state.get(_ts_key, 0)
+        cached = _get_ss().get(_ss_key)
+        cached_ts = _get_ss().get(_ts_key, 0)
         if cached is not None and (_time.time() - cached_ts) < 60:
             return cached
     except Exception:
@@ -230,8 +238,8 @@ def get_all_cached_models() -> list[str]:
 
     result = list(models)
     try:
-        st.session_state[_ss_key] = result
-        st.session_state[_ts_key] = _time.time()
+        _get_ss()[_ss_key] = result
+        _get_ss()[_ts_key] = _time.time()
     except Exception:
         pass
     return result
