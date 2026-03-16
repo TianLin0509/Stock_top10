@@ -259,7 +259,7 @@ def run_deep_top10(model_name: str = "🟤 豆包 · Seed 2.0 Mini",
                    progress_callback=None):
     global _is_running
     from core.ai_client import get_ai_client, get_token_usage
-    from top10.hot_rank import get_hot_rank, get_volume_rank, merge_candidates
+    from top10.hot_rank import get_hot_rank, get_volume_rank, get_xueqiu_hot, merge_candidates
     from top10.stock_filter import apply_filters
     from top10.tushare_data import enrich_candidates, ts_ok
     from top10.scorer import score_all
@@ -295,12 +295,13 @@ def run_deep_top10(model_name: str = "🟤 豆包 · Seed 2.0 Mini",
         _write_status(status)
         _log("📡 Phase 1: 获取候选池...")
 
-        hot_df, _ = get_hot_rank(candidate_count)
-        vol_df, _ = get_volume_rank(candidate_count)
-        merged = merge_candidates(hot_df, vol_df)
+        hot_df, _ = get_hot_rank(50)
+        xq_df, _ = get_xueqiu_hot(50)
+        vol_df, _ = get_volume_rank(50)
+        merged = merge_candidates(hot_df, vol_df, xq_df)
         filtered = apply_filters(merged)
         candidates = filtered.head(candidate_count)
-        _log(f"  候选池: 人气榜{len(hot_df)} + 成交额榜{len(vol_df)} → 合并去重过滤 → {len(candidates)} 只")
+        _log(f"  候选池: 东财{len(hot_df)} + 雪球{len(xq_df)} + 成交额{len(vol_df)} → 合并去重过滤 → {len(candidates)} 只")
 
         if candidates.empty:
             raise RuntimeError("候选池为空")

@@ -1,11 +1,15 @@
-"""数据获取 — 人气榜 + 成交额榜（优先 Tushare，备选东财/akshare）"""
+"""数据获取 — 东财人气榜 + 雪球热门 + 成交额榜"""
 
+import logging
 import pandas as pd
 from core.cache_compat import compat_cache
+
+logger = logging.getLogger(__name__)
 
 
 @compat_cache(ttl=1800)
 def get_hot_rank(top_n: int = 100) -> tuple[pd.DataFrame, str | None]:
+    """东财人气榜"""
     try:
         import akshare as ak
         df = ak.stock_hot_rank_em()
@@ -17,6 +21,25 @@ def get_hot_rank(top_n: int = 100) -> tuple[pd.DataFrame, str | None]:
         return df, None
     except Exception as e:
         return pd.DataFrame(), f"人气榜获取失败：{e}"
+
+
+@compat_cache(ttl=1800)
+def get_xueqiu_hot(top_n: int = 50) -> tuple[pd.DataFrame, str | None]:
+    """雪球关注热度 Top N"""
+    try:
+        import akshare as ak
+        df = ak.stock_hot_follow_xq()
+        if df is None or df.empty:
+            return pd.DataFrame(), "雪球热门数据为空"
+        df = df.head(top_n).copy()
+        df.columns = df.columns[:4]  # 取前4列，不管名字
+        df.columns = ["代码", "股票名称", "关注人数", "最新价"]
+        df["代码"] = df["代码"].astype(str).str.replace(r"^(SH|SZ|BJ)", "", regex=True)
+        df["排名"] = range(1, len(df) + 1)
+        logger.info("[xueqiu] 获取雪球热门 %d 只", len(df))
+        return df, None
+    except Exception as e:
+        return pd.DataFrame(), f"雪球热门获取失败：{e}"
 
 
 @compat_cache(ttl=1800)
@@ -100,40 +123,88 @@ def _get_volume_rank_akshare(top_n: int) -> tuple[pd.DataFrame, str | None]:
         return pd.DataFrame(), f"成交额榜获取失败（备用方案也失败）：{e}"
 
 
-def merge_candidates(hot_df: pd.DataFrame, vol_df: pd.DataFrame) -> pd.DataFrame:
-    if hot_df.empty and vol_df.empty:
-        return pd.DataFrame()
+def merge_candidates(hot_df: pd.DataFrame, vol_df: pd.DataFrame,
+                     xq_df: pd.DataFrame = None) -> pd.DataFrame:
+    """合并东财人气榜 + 成交额榜 + 雪球热门，去重后返回"""
+    if xq_df is None:
+        xq_df = pd.DataFrame()
 
+    # 收集所有来源
+    parts = []
+    seen_codes = set()
+
+    # 1) 东财人气榜
     if not hot_df.empty:
-        merged = hot_df[["代码", "股票名称", "最新价", "涨跌幅"]].copy()
-        merged["来源"] = "人气榜"
-        merged["人气排名"] = hot_df["排名"]
-    else:
-        merged = pd.DataFrame()
+        h = hot_df[["代码", "股票名称", "最新价", "涨跌幅"]].copy()
+        h["人气排名"] = hot_df["排名"]
+        h["来源"] = "东财人气"
+        parts.append(h)
+        seen_codes.update(h["代码"].tolist())
 
+    # 2) 雪球热门
+    if not xq_df.empty:
+        x = xq_df[["代码", "股票名称", "最新价"]].copy()
+        x["涨跌幅"] = 0.0
+        x["雪球排名"] = xq_df["排名"]
+        # 已有的标记为多榜
+        already = x["代码"].isin(seen_codes)
+        new_only = x[~already].copy()
+        if not new_only.empty:
+            new_only["来源"] = "雪球热门"
+            parts.append(new_only)
+            seen_codes.update(new_only["代码"].tolist())
+        # 给已有的补上雪球排名
+        if already.any():
+            xq_rank_map = dict(zip(xq_df["代码"], xq_df["排名"]))
+            for p in parts:
+                mask = p["代码"].isin(xq_rank_map)
+                if mask.any():
+                    p.loc[mask, "雪球排名"] = p.loc[mask, "代码"].map(xq_rank_map)
+
+    # 3) 成交额榜
     if not vol_df.empty:
         v = vol_df[["代码", "股票名称", "最新价", "涨跌幅"]].copy()
         v["成交额排名"] = vol_df["排名"]
         if "成交额(亿)" in vol_df.columns:
             v["成交额(亿)"] = vol_df["成交额(亿)"]
+        for col in ["换手率", "量比", "市盈率", "总市值(亿)", "主力净流入(万)"]:
+            if col in vol_df.columns:
+                v[col] = vol_df[col]
 
-        if not merged.empty:
-            both_mask = merged["代码"].isin(v["代码"])
-            merged.loc[both_mask, "来源"] = "双榜"
+        already = v["代码"].isin(seen_codes)
+        new_only = v[~already].copy()
+        if not new_only.empty:
+            new_only["来源"] = "成交额榜"
+            parts.append(new_only)
 
-            v_indexed = v.set_index("代码")
-            merged["成交额排名"] = merged["代码"].map(v_indexed["成交额排名"].to_dict())
-            for col in ["成交额(亿)", "换手率", "量比", "市盈率", "总市值(亿)", "主力净流入(万)"]:
-                if col in v.columns:
-                    merged[col] = merged["代码"].map(v_indexed[col].to_dict())
+        # 给已有的补上成交额数据
+        v_indexed = v.set_index("代码")
+        for p in parts:
+            for col in ["成交额排名", "成交额(亿)", "换手率", "量比", "市盈率",
+                        "总市值(亿)", "主力净流入(万)"]:
+                if col in v_indexed.columns and col not in p.columns:
+                    p[col] = None
+                if col in v_indexed.columns:
+                    mask = p["代码"].isin(v_indexed.index) & (p[col].isna() if col in p.columns else True)
+                    if mask.any():
+                        p.loc[mask, col] = p.loc[mask, "代码"].map(v_indexed[col].to_dict())
 
-            new_only = v[~v["代码"].isin(merged["代码"])].copy()
-            if not new_only.empty:
-                new_only["来源"] = "成交额榜"
-                merged = pd.concat([merged, new_only], ignore_index=True)
-        else:
-            v["来源"] = "成交额榜"
-            merged = v
+    if not parts:
+        return pd.DataFrame()
+
+    merged = pd.concat(parts, ignore_index=True)
+
+    # 标记多榜命中
+    for _, row in merged.iterrows():
+        sources = []
+        if pd.notna(row.get("人气排名")):
+            sources.append("东财")
+        if pd.notna(row.get("雪球排名")):
+            sources.append("雪球")
+        if pd.notna(row.get("成交额排名")):
+            sources.append("成交额")
+        if len(sources) > 1:
+            merged.loc[merged["代码"] == row["代码"], "来源"] = "+".join(sources)
 
     merged = _fill_volume_data(merged)
 
@@ -142,7 +213,7 @@ def merge_candidates(hot_df: pd.DataFrame, vol_df: pd.DataFrame) -> pd.DataFrame
         if col in merged.columns:
             merged[col] = pd.to_numeric(merged[col], errors="coerce").round(2)
 
-    for col in ["人气排名", "成交额排名"]:
+    for col in ["人气排名", "成交额排名", "雪球排名"]:
         if col in merged.columns:
             merged[col] = pd.to_numeric(merged[col], errors="coerce")
 
