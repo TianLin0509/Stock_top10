@@ -336,7 +336,7 @@ def run_deep_top10(model_name: str = "🟤 豆包 · Seed 2.0 Mini",
         scored = score_all(client, cfg, enriched,
                            model_name=model_name,
                            progress_callback=score_progress,
-                           max_workers=3)
+                           max_workers=6)
 
         _log(f"  ✅ 评分完成，共 {len(scored)} 只")
 
@@ -357,7 +357,7 @@ def run_deep_top10(model_name: str = "🟤 豆包 · Seed 2.0 Mini",
             name = str(row.get("股票名称", ""))
             return code6, name, _deep_analyze_one(client, cfg, model_name, code6, name, username)
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             futures = {
                 pool.submit(_analyze_one, row): row["股票名称"]
                 for _, row in scored_top.iterrows()

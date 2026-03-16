@@ -91,8 +91,17 @@ def doubao_call(cfg, messages, max_tokens) -> tuple[str, str | None]:
         if resp.status_code != 200:
             return "", f"豆包 API 错误 {resp.status_code}：{resp.text[:200]}"
         data = resp.json()
+        # 检查 API 级别错误
+        if "error" in data:
+            err_msg = data["error"].get("message", str(data["error"]))[:200]
+            logger.warning("[doubao] API 返回错误: %s", err_msg)
+            return "", f"豆包 API 错误：{err_msg}"
         text = _doubao_extract_text(data)
-        return text or "（豆包未返回内容）", None
+        if not text:
+            logger.warning("[doubao] 返回内容为空, status=%s, keys=%s",
+                           data.get("status"), list(data.keys())[:10])
+            return "", "豆包返回内容为空，可能联网搜索超时或并发限流"
+        return text, None
     except requests.exceptions.Timeout:
         return "", "豆包 API 请求超时，请稍后重试"
     except Exception as e:
@@ -155,12 +164,18 @@ def call_ai(client: OpenAI, cfg: dict, prompt: str,
     """
     messages = _build_messages(prompt, system)
 
-    # 豆包专属路径
+    # 豆包专属路径（带重试）
     if cfg.get("provider") == "doubao" and cfg.get("supports_search"):
-        text, err = doubao_call(cfg, messages, max_tokens)
-        if not err:
-            est = int((len(prompt) + len(text)) * 1.5)
-            add_tokens(total_tokens=est, username=username)
+        for attempt in range(_MAX_RETRIES):
+            text, err = doubao_call(cfg, messages, max_tokens)
+            if not err:
+                est = int((len(prompt) + len(text)) * 1.5)
+                add_tokens(total_tokens=est, username=username)
+                return text, None
+            logger.warning("[doubao] 第%d次尝试失败: %s", attempt + 1, err)
+            if attempt < _MAX_RETRIES - 1:
+                import time as _time
+                _time.sleep(_RETRY_DELAYS[attempt])
         return text, err
 
     extra = _build_extra(cfg)
